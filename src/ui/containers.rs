@@ -7,13 +7,14 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    AlertDialog, Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label,
-    ListItem, Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection,
-    Widget, Window,
+    Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem,
+    Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, Widget,
+    Window,
 };
 
 use super::banner::Banner;
 use super::detail::DetailView;
+use super::dialog::confirm;
 use super::list::{self, mono_column, text_column};
 use super::object::ContainerObject;
 use crate::docker::{Docker, DockerError, LogEvent, StreamHandle};
@@ -540,24 +541,6 @@ impl ContainersPage {
             }
         });
     }
-}
-
-/// Ask the user to confirm a destructive action.
-///
-/// Cancel is both the default and the cancel button, so a stray Return or
-/// Escape never deletes anything.
-async fn confirm(parent: Option<&Window>, message: &str, detail: &str, action: &str) -> bool {
-    let dialog = AlertDialog::builder()
-        .modal(true)
-        .message(message)
-        .detail(detail)
-        .buttons(["Cancel", action])
-        .cancel_button(0)
-        .default_button(0)
-        .build();
-
-    // An error means the dialog was dismissed, which is a "no".
-    dialog.choose_future(parent).await == Ok(1)
 }
 
 /// Remove a container off the main thread.

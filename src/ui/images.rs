@@ -8,13 +8,14 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ProgressBar,
-    Revealer, ScrolledWindow, SingleSelection, Widget,
+    Revealer, ScrolledWindow, SingleSelection, Widget, Window,
 };
 
 use super::banner::Banner;
+use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Row};
 use super::object::ImageObject;
-use crate::docker::{now_seconds, Docker, Image, PullEvent, StreamHandle};
+use crate::docker::{now_seconds, Docker, DockerError, Image, PullEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -61,6 +62,7 @@ pub struct ImagesPage {
     progress: Revealer,
     progress_bar: ProgressBar,
     progress_label: Label,
+    remove_button: Button,
     /// The running pull. Dropping it cancels the stream.
     pull: RefCell<Option<StreamHandle>>,
 }
@@ -110,8 +112,13 @@ impl ImagesPage {
             .margin_start(6)
             .margin_end(6)
             .build();
+        let remove_button = Button::with_label("Remove");
+        remove_button.add_css_class("destructive-action");
+        remove_button.set_sensitive(false);
+
         actions.append(&reference);
         actions.append(&pull_button);
+        actions.append(&remove_button);
 
         let progress_label = Label::builder()
             .halign(Align::Start)
@@ -161,6 +168,7 @@ impl ImagesPage {
             progress,
             progress_bar,
             progress_label,
+            remove_button,
             pull: RefCell::new(None),
         });
 
@@ -190,8 +198,89 @@ impl ImagesPage {
             }
         });
 
+        page.remove_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.remove_selected();
+                }
+            }
+        });
+        // Removing needs a selected image.
+        page.selection.connect_selected_item_notify({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    let ready = page.selected().is_some();
+                    page.remove_button.set_sensitive(ready);
+                }
+            }
+        });
+
         page.refresh();
         page
+    }
+
+    /// Remove the selected image, after confirming.
+    fn remove_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let id = row.id();
+        let name = match row.repository().as_str() {
+            "<none>" => row.short_id(),
+            repository => format!("{repository}:{}", row.tag()),
+        };
+        let parent = self.root.root().and_downcast::<Window>();
+        self.banner.clear();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let confirmed = confirm(
+                parent.as_ref(),
+                &format!("Remove {name}?"),
+                "The image is deleted from this machine. Containers using it are unaffected \
+                 until they are recreated.",
+                "Remove",
+            )
+            .await;
+            if !confirmed {
+                return;
+            }
+
+            match remove(&id, false).await {
+                Ok(()) => {}
+                Err(DockerError::Api { status: 409, .. }) => {
+                    let forced = confirm(
+                        parent.as_ref(),
+                        &format!("{name} is still in use."),
+                        "A container still references this image. Removing it anyway can leave \
+                         those containers unable to start.",
+                        "Force remove",
+                    )
+                    .await;
+                    if !forced {
+                        return;
+                    }
+                    if let Err(e) = remove(&id, true).await {
+                        if let Some(page) = page.upgrade() {
+                            page.show_error(&format!("Could not force remove {name}. {e}"));
+                        }
+                        return;
+                    }
+                }
+                Err(e) => {
+                    if let Some(page) = page.upgrade() {
+                        page.show_error(&format!("Could not remove {name}. {e}"));
+                    }
+                    return;
+                }
+            }
+
+            if let Some(page) = page.upgrade() {
+                page.refresh();
+            }
+        });
     }
 
     /// Begin pulling whatever the entry names.
@@ -278,7 +367,6 @@ impl ImagesPage {
     }
 
     /// The image the user has selected, if any.
-    #[allow(dead_code)]
     fn selected(&self) -> Option<ImageObject> {
         self.selection.selected_item().and_downcast::<ImageObject>()
     }
@@ -316,4 +404,12 @@ impl ImagesPage {
             page.refreshing.set(false);
         });
     }
+}
+
+/// Remove an image off the main thread.
+async fn remove(id: &str, force: bool) -> Result<(), DockerError> {
+    let id = id.to_string();
+    gio::spawn_blocking(move || Docker::connect()?.remove_image(&id, force))
+        .await
+        .unwrap_or_else(|_| Err(DockerError::Protocol("the remove task panicked".into())))
 }

@@ -264,6 +264,18 @@ impl Docker {
     pub fn images(&self) -> Result<Vec<Image>, DockerError> {
         self.get_json("/images/json?all=0")
     }
+
+    /// Remove an image.
+    ///
+    /// An image a container still references is a 409 unless `force` is set.
+    pub fn remove_image(&self, id: &str, force: bool) -> Result<(), DockerError> {
+        let path = if force {
+            format!("/images/{id}?force=true")
+        } else {
+            format!("/images/{id}")
+        };
+        self.delete(&path)
+    }
 }
 
 #[cfg(test)]

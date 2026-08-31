@@ -6,6 +6,7 @@
 mod banner;
 mod containers;
 mod detail;
+mod dialog;
 mod images;
 mod list;
 mod object;

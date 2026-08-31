@@ -419,6 +419,38 @@ mod tests {
     }
 
     #[test]
+    fn removes_an_image() {
+        let server = serve(with_length("200 OK", r#"[{"Deleted":"sha256:abc"}]"#));
+        assert!(server.docker.remove_image("sha256:abc", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /images/sha256:abc HTTP/1.1");
+    }
+
+    #[test]
+    fn force_removes_an_image() {
+        let server = serve(with_length("200 OK", "[]"));
+        assert!(server.docker.remove_image("abc", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /images/abc?force=true HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn reports_an_image_still_in_use_as_a_conflict() {
+        let server = serve(with_length(
+            "409 Conflict",
+            r#"{"message":"conflict: unable to delete abc (must be forced)"}"#,
+        ));
+        match server.docker.remove_image("abc", false) {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 409);
+                assert!(message.contains("must be forced"));
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn extracts_the_docker_error_message() {
         let body = br#"{"message":"No such container: abc"}"#;
         assert_eq!(api_message(body), "No such container: abc");
