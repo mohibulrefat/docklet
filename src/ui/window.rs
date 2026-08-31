@@ -10,6 +10,7 @@ use gtk::{
     StackSwitcher,
 };
 
+use super::containers::ContainersPage;
 use crate::docker::Docker;
 
 const LOG_DOMAIN: &str = "docklet";
@@ -18,8 +19,10 @@ const DEFAULT_HEIGHT: i32 = 600;
 
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
+    let containers = ContainersPage::new();
+
     let stack = Stack::builder().vexpand(true).build();
-    stack.add_titled(&placeholder("Containers"), Some("containers"), "Containers");
+    stack.add_titled(containers.widget(), Some("containers"), "Containers");
     stack.add_titled(&placeholder("Images"), Some("images"), "Images");
     stack.add_titled(&placeholder("Volumes"), Some("volumes"), "Volumes");
     stack.add_titled(&placeholder("Networks"), Some("networks"), "Networks");
