@@ -7,11 +7,12 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ScrolledWindow,
-    SingleSelection, Widget, Window,
+    Align, Box as GtkBox, Button, ColumnView, Entry, Grid, Label, Orientation, PolicyType,
+    ScrolledWindow, Separator, SingleSelection, Widget, Window,
 };
 
 use super::banner::Banner;
+use super::detail::field;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Row};
 use super::object::VolumeObject;
@@ -57,6 +58,112 @@ pub struct VolumesPage {
     name_entry: Entry,
     driver_entry: Entry,
     remove_button: Button,
+    detail: VolumeDetail,
+}
+
+/// A read-only view of one volume.
+struct VolumeDetail {
+    root: GtkBox,
+    back: Button,
+    title: Label,
+    driver: Label,
+    scope: Label,
+    mountpoint: Label,
+    created: Label,
+    options: Label,
+    used_by: Label,
+}
+
+impl VolumeDetail {
+    fn new() -> Self {
+        let back = Button::from_icon_name("go-previous-symbolic");
+        back.set_tooltip_text(Some("Back to volumes"));
+
+        let title = Label::builder().halign(Align::Start).build();
+        title.add_css_class("heading");
+
+        let header = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        header.append(&back);
+        header.append(&title);
+
+        let grid = Grid::builder()
+            .row_spacing(6)
+            .column_spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        let driver = field(&grid, 0, "Driver", false);
+        let scope = field(&grid, 1, "Scope", false);
+        let mountpoint = field(&grid, 2, "Mountpoint", true);
+        let created = field(&grid, 3, "Created", false);
+        let options = field(&grid, 4, "Options", false);
+        let used_by = field(&grid, 5, "Used by", false);
+
+        let scrolled = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .child(&grid)
+            .build();
+
+        let root = GtkBox::new(Orientation::Vertical, 0);
+        root.append(&header);
+        root.append(&Separator::new(Orientation::Horizontal));
+        root.append(&scrolled);
+        root.set_visible(false);
+
+        VolumeDetail {
+            root,
+            back,
+            title,
+            driver,
+            scope,
+            mountpoint,
+            created,
+            options,
+            used_by,
+        }
+    }
+
+    fn show(&self, name: &str) {
+        self.title.set_text(name);
+        for label in [
+            &self.driver,
+            &self.scope,
+            &self.mountpoint,
+            &self.created,
+            &self.options,
+            &self.used_by,
+        ] {
+            label.set_text("");
+        }
+    }
+
+    fn set_volume(&self, volume: &Volume) {
+        self.driver.set_text(&volume.driver);
+        self.scope.set_text(&volume.scope);
+        self.mountpoint.set_text(&volume.mountpoint);
+        self.created.set_text(&volume.created_at);
+        self.options.set_text(&volume.options_display());
+    }
+
+    fn set_users(&self, users: &[String]) {
+        let text = if users.is_empty() {
+            "No containers".to_string()
+        } else {
+            users.join(", ")
+        };
+        self.used_by.set_text(&text);
+    }
 }
 
 impl VolumesPage {
@@ -115,11 +222,14 @@ impl VolumesPage {
         remove_button.set_sensitive(false);
         actions.append(&remove_button);
 
+        let detail = VolumeDetail::new();
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
+        root.append(&detail.root);
 
         let page = Rc::new(VolumesPage {
             root,
@@ -132,6 +242,7 @@ impl VolumesPage {
             name_entry,
             driver_entry,
             remove_button,
+            detail,
         });
 
         create_button.connect_clicked({
@@ -169,8 +280,78 @@ impl VolumesPage {
             }
         });
 
+        view.connect_activate({
+            let page = Rc::downgrade(&page);
+            move |_, _| {
+                if let Some(page) = page.upgrade() {
+                    page.open_detail();
+                }
+            }
+        });
+        page.detail.back.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.close_detail();
+                }
+            }
+        });
+
         page.refresh();
         page
+    }
+
+    /// Show the detail pane for the selected volume.
+    fn open_detail(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let name = row.name();
+        self.detail.show(&name);
+        self.scrolled.set_visible(false);
+        self.empty.set_visible(false);
+        self.detail.root.set_visible(true);
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            // Docker does not report which containers use a volume, so the
+            // container list is scanned for it — one extra request, only when
+            // a detail pane is actually opened.
+            let looked_up = {
+                let name = name.clone();
+                gio::spawn_blocking(move || {
+                    let docker = Docker::connect()?;
+                    let volume = docker.inspect_volume(&name)?;
+                    let users = docker.volume_users(&name)?;
+                    Ok::<_, DockerError>((volume, users))
+                })
+                .await
+            };
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match looked_up {
+                Ok(Ok((volume, users))) => {
+                    page.detail.set_volume(&volume);
+                    page.detail.set_users(&users);
+                }
+                Ok(Err(e)) => page.show_error(&format!("Could not inspect {name}. {e}")),
+                Err(_) => page.show_error(&format!("Could not inspect {name}.")),
+            }
+        });
+    }
+
+    /// Return to the list.
+    fn close_detail(self: &Rc<Self>) {
+        self.detail.root.set_visible(false);
+        let is_empty = self.store.n_items() == 0;
+        self.empty.set_visible(is_empty);
+        self.scrolled.set_visible(!is_empty);
+    }
+
+    fn showing_detail(&self) -> bool {
+        self.detail.root.is_visible()
     }
 
     /// Remove the selected volume, after confirming.
@@ -292,9 +473,11 @@ impl VolumesPage {
             match listed {
                 Ok(Ok(volumes)) => {
                     list::apply::<VolumeObject>(&page.store, &volumes);
-                    let is_empty = page.store.n_items() == 0;
-                    page.empty.set_visible(is_empty);
-                    page.scrolled.set_visible(!is_empty);
+                    if !page.showing_detail() {
+                        let is_empty = page.store.n_items() == 0;
+                        page.empty.set_visible(is_empty);
+                        page.scrolled.set_visible(!is_empty);
+                    }
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list volumes. {e}")),
                 Err(_) => page.show_error("Could not list volumes."),
