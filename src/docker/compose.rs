@@ -156,6 +156,21 @@ impl Docker {
         }
         result
     }
+
+    /// Stop every running container in a project.
+    pub fn compose_stop(&self, project: &ComposeProject) -> ProjectActionResult {
+        let mut result = ProjectActionResult::default();
+        for service in &project.services {
+            if service.state != "running" {
+                continue;
+            }
+            match self.stop_container(&service.container_id) {
+                Ok(()) => result.succeeded.push(service.name.clone()),
+                Err(e) => result.failed.push((service.name.clone(), e.to_string())),
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -294,22 +309,46 @@ mod tests {
     }
 
     #[test]
-    fn skips_services_already_running_when_starting() {
-        // Proven against the fake socket in docker::tests, since starting
-        // needs live requests; this only checks the loop's own bookkeeping,
-        // by starting against no server and confirming the running one was
-        // never dialled — a failed connection for it would show up as
-        // `failed`, and it does not.
-        let project = project_of(vec![("web", "a", "running"), ("db", "b", "exited")]);
-        assert_eq!(
-            project
-                .services
-                .iter()
-                .filter(|s| s.state != "running")
-                .count(),
-            1,
-            "only one service is actually stopped"
-        );
+    fn identifies_which_services_a_start_would_touch() {
+        // compose_start/compose_stop's own HTTP calls are covered live
+        // (against this machine's real Compose projects); this is the pure
+        // bookkeeping around them — which services an action considers.
+        let project = project_of(vec![
+            ("web", "a", "running"),
+            ("db", "b", "exited"),
+            ("cache", "c", "exited"),
+        ]);
+        let to_start: Vec<&str> = project
+            .services
+            .iter()
+            .filter(|s| s.state != "running")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(to_start, vec!["db", "cache"]);
+    }
+
+    #[test]
+    fn identifies_which_services_a_stop_would_touch() {
+        let project = project_of(vec![
+            ("web", "a", "running"),
+            ("db", "b", "exited"),
+            ("cache", "c", "running"),
+        ]);
+        let to_stop: Vec<&str> = project
+            .services
+            .iter()
+            .filter(|s| s.state == "running")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(to_stop, vec!["web", "cache"]);
+    }
+
+    #[test]
+    fn project_action_result_reports_success_only_with_no_failures() {
+        let mut result = ProjectActionResult::default();
+        assert!(result.is_success());
+        result.failed.push(("db".to_string(), "boom".to_string()));
+        assert!(!result.is_success());
     }
 
     /// Real labels captured from this machine's own containers.

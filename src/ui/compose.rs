@@ -67,6 +67,7 @@ pub struct ComposePage {
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
     start_button: Button,
+    stop_button: Button,
 }
 
 impl ComposePage {
@@ -119,7 +120,10 @@ impl ComposePage {
             .margin_start(6)
             .margin_end(6)
             .build();
+        let stop_button = Button::with_label("Stop");
+        stop_button.set_sensitive(false);
         actions.append(&start_button);
+        actions.append(&stop_button);
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
@@ -136,6 +140,7 @@ impl ComposePage {
             banner,
             refreshing: Rc::new(Cell::new(false)),
             start_button,
+            stop_button,
         });
 
         page.start_button.connect_clicked({
@@ -146,17 +151,90 @@ impl ComposePage {
                 }
             }
         });
+        page.stop_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.stop_selected();
+                }
+            }
+        });
         page.selection.connect_selected_item_notify({
             let page = Rc::downgrade(&page);
             move |_| {
                 if let Some(page) = page.upgrade() {
-                    page.start_button.set_sensitive(page.selected().is_some());
+                    page.sync_action_buttons();
                 }
             }
         });
 
         page.refresh();
         page
+    }
+
+    /// Enable Start/Stop only when a project is selected.
+    fn sync_action_buttons(&self) {
+        let ready = self.selected().is_some();
+        self.start_button.set_sensitive(ready);
+        self.stop_button.set_sensitive(ready);
+    }
+
+    /// Neither button while an action is running.
+    fn sync_action_buttons_busy(&self) {
+        self.start_button.set_sensitive(false);
+        self.stop_button.set_sensitive(false);
+    }
+
+    /// Stop the selected project's running containers.
+    fn stop_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let name = row.name();
+        self.banner.clear();
+        self.sync_action_buttons_busy();
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let stopped = gio::spawn_blocking(
+                move || -> Result<ProjectActionResult, crate::docker::DockerError> {
+                    let docker = Docker::connect()?;
+                    let projects = docker.compose_projects()?;
+                    let project =
+                        projects
+                            .into_iter()
+                            .find(|p| p.name == name)
+                            .ok_or_else(|| {
+                                crate::docker::DockerError::Protocol(
+                                    "project is no longer present".to_string(),
+                                )
+                            })?;
+                    Ok(docker.compose_stop(&project))
+                },
+            )
+            .await;
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match stopped {
+                Ok(Ok(result)) if result.is_success() => page.refresh(),
+                Ok(Ok(result)) => {
+                    let details: Vec<String> = result
+                        .failed
+                        .iter()
+                        .map(|(service, error)| format!("{service}: {error}"))
+                        .collect();
+                    page.show_error(&format!(
+                        "Some services could not be stopped. {}",
+                        details.join("; ")
+                    ));
+                    page.refresh();
+                }
+                Ok(Err(e)) => page.show_error(&format!("Could not stop the project. {e}")),
+                Err(_) => page.show_error("Could not stop the project."),
+            }
+        });
     }
 
     /// Start the selected project's existing, stopped containers.
@@ -166,7 +244,7 @@ impl ComposePage {
         };
         let name = row.name();
         self.banner.clear();
-        self.start_button.set_sensitive(false);
+        self.sync_action_buttons_busy();
 
         let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -245,7 +323,7 @@ impl ComposePage {
                     let is_empty = page.store.n_items() == 0;
                     page.empty.set_visible(is_empty);
                     page.scrolled.set_visible(!is_empty);
-                    page.start_button.set_sensitive(page.selected().is_some());
+                    page.sync_action_buttons();
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list Compose projects. {e}")),
                 Err(_) => page.show_error("Could not list Compose projects."),
