@@ -8,12 +8,12 @@ use gtk::glib;
 use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem, Orientation,
-    PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, Widget,
+    Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem,
+    Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, Widget,
 };
 
 use super::object::ContainerObject;
-use crate::docker::{Container, Docker};
+use crate::docker::{Container, Docker, DockerError};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -40,12 +40,13 @@ pub struct ContainersPage {
     scrolled: ScrolledWindow,
     empty: Label,
     store: gio::ListStore,
+    selection: SingleSelection,
     /// Guards against a second refresh starting while one is in flight.
     refreshing: Rc<Cell<bool>>,
 }
 
 impl ContainersPage {
-    pub fn new() -> Self {
+    pub fn new() -> Rc<Self> {
         let store = gio::ListStore::new::<ContainerObject>();
         let selection = SingleSelection::new(Some(store.clone()));
 
@@ -71,19 +72,85 @@ impl ContainersPage {
             .build();
         empty.add_css_class("dim-label");
 
+        let actions = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+
         let root = GtkBox::new(Orientation::Vertical, 0);
+        root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
 
-        let page = ContainersPage {
+        let page = Rc::new(ContainersPage {
             root,
             scrolled,
             empty,
             store,
+            selection,
             refreshing: Rc::new(Cell::new(false)),
-        };
+        });
+
+        actions.append(&page.action_button("Start", Docker::start_container));
+
         page.refresh();
         page
+    }
+
+    /// The container the user has selected, if any.
+    fn selected(&self) -> Option<ContainerObject> {
+        self.selection
+            .selected_item()
+            .and_downcast::<ContainerObject>()
+    }
+
+    /// A button that runs one lifecycle action on the selected container.
+    fn action_button(
+        self: &Rc<Self>,
+        label: &'static str,
+        action: fn(&Docker, &str) -> Result<(), DockerError>,
+    ) -> Button {
+        let button = Button::with_label(label);
+        let page = Rc::downgrade(self);
+
+        button.connect_clicked(move |_| {
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            page.act(label, action);
+        });
+        button
+    }
+
+    /// Run an action against the selected container, then reload the list.
+    fn act(
+        self: &Rc<Self>,
+        label: &'static str,
+        action: fn(&Docker, &str) -> Result<(), DockerError>,
+    ) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let id = row.id();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let outcome = gio::spawn_blocking(move || action(&Docker::connect()?, &id)).await;
+
+            match outcome {
+                Ok(Ok(())) => {
+                    if let Some(page) = page.upgrade() {
+                        page.refresh();
+                    }
+                }
+                Ok(Err(e)) => glib::g_warning!(LOG_DOMAIN, "{label} failed: {e}"),
+                Err(_) => glib::g_warning!(LOG_DOMAIN, "{label} panicked"),
+            }
+        });
     }
 
     pub fn widget(&self) -> &Widget {

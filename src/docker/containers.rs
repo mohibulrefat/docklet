@@ -75,6 +75,13 @@ impl Docker {
     }
 }
 
+impl Docker {
+    /// Start a stopped container.
+    pub fn start_container(&self, id: &str) -> Result<(), DockerError> {
+        self.post(&format!("/containers/{id}/start"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

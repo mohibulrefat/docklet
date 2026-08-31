@@ -10,8 +10,6 @@ use gtk::{
     StackSwitcher,
 };
 
-use std::rc::Rc;
-
 use super::containers::ContainersPage;
 use crate::docker::Docker;
 
@@ -21,7 +19,7 @@ const DEFAULT_HEIGHT: i32 = 600;
 
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
-    let containers = Rc::new(ContainersPage::new());
+    let containers = ContainersPage::new();
 
     let stack = Stack::builder().vexpand(true).build();
     stack.add_titled(containers.widget(), Some("containers"), "Containers");

@@ -50,9 +50,15 @@ fn write_request(
          Accept: application/json\r\n\
          Connection: close\r\n"
     );
-    if let Some(body) = body {
-        head.push_str("Content-Type: application/json\r\n");
-        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    match body {
+        Some(body) => {
+            head.push_str("Content-Type: application/json\r\n");
+            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        // A bodyless POST or DELETE still declares its length, so the daemon
+        // never waits for a body that is not coming.
+        None if method != "GET" => head.push_str("Content-Length: 0\r\n"),
+        None => {}
     }
     head.push_str("\r\n");
 

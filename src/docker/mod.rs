@@ -107,6 +107,16 @@ impl Docker {
         serde_json::from_slice(&body).map_err(|e| DockerError::Decode(e.to_string()))
     }
 
+    /// POST a path with no body, discarding the response.
+    ///
+    /// Docker's lifecycle endpoints answer `204 No Content` on success and
+    /// `304 Not Modified` when the container is already in the requested
+    /// state — both mean the caller got what it asked for.
+    pub fn post(&self, path: &str) -> Result<(), DockerError> {
+        self.request("POST", path, None)?;
+        Ok(())
+    }
+
     /// Check that the daemon is alive.
     ///
     /// `/_ping` is the cheapest endpoint Docker offers — it answers `OK` and
@@ -159,6 +169,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     /// A throwaway unix socket serving one canned response, then closing.
     ///
@@ -171,6 +182,22 @@ mod tests {
     struct Server {
         docker: Docker,
         path: PathBuf,
+        /// What the client actually sent, for asserting method and path.
+        sent: Arc<Mutex<String>>,
+    }
+
+    impl Server {
+        /// The request line, e.g. `POST /containers/abc/start HTTP/1.1`.
+        fn request_line(&self) -> String {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.lines().next().unwrap_or_default().to_string()
+        }
+
+        /// Whether the request carried a given header line.
+        fn sent_header(&self, header: &str) -> bool {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.lines().any(|l| l.eq_ignore_ascii_case(header))
+        }
     }
 
     impl Drop for Server {
@@ -189,10 +216,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let listener = UnixListener::bind(&path).unwrap();
+        let sent = Arc::new(Mutex::new(String::new()));
+        let recorder = sent.clone();
+
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0; 1024];
-                let _ = stream.read(&mut buf);
+                let read = stream.read(&mut buf).unwrap_or(0);
+                *recorder.lock().expect("recorder") =
+                    String::from_utf8_lossy(&buf[..read]).to_string();
                 let _ = stream.write_all(response.as_bytes());
             }
         });
@@ -202,6 +234,7 @@ mod tests {
                 endpoint: Endpoint::Unix(path.clone()),
             },
             path,
+            sent,
         }
     }
 
@@ -212,6 +245,11 @@ mod tests {
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    /// A bodyless response, as Docker sends for lifecycle actions.
+    fn status_only(status: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n")
     }
 
     /// The same, as a single chunk, to exercise the chunked path Docker uses.
@@ -266,6 +304,46 @@ mod tests {
         match docker.ping() {
             Err(DockerError::Unreachable(msg)) => assert!(msg.contains("daemon running"), "{msg}"),
             other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn starts_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.start_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/start HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn declares_a_zero_length_body_on_post() {
+        // Without this the daemon can sit waiting for a body that never comes.
+        let server = serve(status_only("204 No Content"));
+        let _ = server.docker.start_container("abc123");
+        assert!(server.sent_header("Content-Length: 0"));
+    }
+
+    #[test]
+    fn treats_already_started_as_success() {
+        // 304 means the container was already running — not a failure.
+        let server = serve(status_only("304 Not Modified"));
+        assert!(server.docker.start_container("abc123").is_ok());
+    }
+
+    #[test]
+    fn reports_a_missing_container_on_start() {
+        let server = serve(with_length(
+            "404 Not Found",
+            r#"{"message":"No such container: abc123"}"#,
+        ));
+        match server.docker.start_container("abc123") {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 404);
+                assert_eq!(message, "No such container: abc123");
+            }
+            other => panic!("expected 404, got {other:?}"),
         }
     }
 
