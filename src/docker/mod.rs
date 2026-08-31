@@ -12,6 +12,7 @@ mod images;
 mod logs;
 mod stream;
 mod transport;
+mod volumes;
 
 use std::fmt;
 
@@ -22,6 +23,7 @@ pub use endpoint::Endpoint;
 pub use images::{now_seconds, Image, ImageInspect, PullEvent};
 pub use logs::LogEvent;
 pub use stream::StreamHandle;
+pub use volumes::Volume;
 
 /// Everything that can go wrong talking to Docker.
 ///
@@ -127,6 +129,12 @@ impl Docker {
     pub fn delete(&self, path: &str) -> Result<(), DockerError> {
         self.request("DELETE", path, None)?;
         Ok(())
+    }
+
+    /// POST a JSON body, returning the raw response.
+    pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Vec<u8>, DockerError> {
+        let encoded = serde_json::to_vec(body).map_err(|e| DockerError::Decode(e.to_string()))?;
+        self.request("POST", path, Some(&encoded))
     }
 
     /// Check that the daemon is alive.

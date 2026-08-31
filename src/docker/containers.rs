@@ -26,6 +26,9 @@ pub struct Container {
     pub status: String,
     #[serde(rename = "Labels", default, deserialize_with = "null_as_default")]
     pub labels: HashMap<String, String>,
+    /// Present on `/containers/json`, and how volume usage is discovered.
+    #[serde(rename = "Mounts", default, deserialize_with = "null_as_default")]
+    pub mounts: Vec<Mount>,
 }
 
 impl Container {
@@ -38,6 +41,13 @@ impl Container {
             Some(name) => name.strip_prefix('/').unwrap_or(name),
             None => self.short_id(),
         }
+    }
+
+    /// Whether this container mounts a named volume.
+    pub fn mounts_volume(&self, volume: &str) -> bool {
+        self.mounts
+            .iter()
+            .any(|mount| mount.kind == "volume" && mount.name == volume)
     }
 
     /// The first 12 characters of the id — what Docker itself displays.
@@ -131,6 +141,11 @@ pub struct NetworkEndpoint {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Mount {
+    /// `volume` or `bind`; only named volumes carry a `Name`.
+    #[serde(rename = "Type", default)]
+    pub kind: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
     #[serde(rename = "Source", default)]
     pub source: String,
     #[serde(rename = "Destination", default)]
@@ -301,6 +316,20 @@ mod tests {
         "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}},
         "Mounts": [{"Source": "/host/data", "Destination": "/data"}]
     }"#;
+
+    #[test]
+    fn finds_containers_mounting_a_named_volume() {
+        let container: Container = serde_json::from_str(
+            r#"{"Id":"a","Names":["/db"],"Image":"i","State":"running","Status":"Up",
+                 "Mounts":[{"Type":"bind","Source":"/host","Destination":"/app"},
+                           {"Type":"volume","Name":"pgdata","Destination":"/var/lib"}]}"#,
+        )
+        .unwrap();
+        assert!(container.mounts_volume("pgdata"));
+        // A bind mount is not a named volume, and must not match by path.
+        assert!(!container.mounts_volume("/host"));
+        assert!(!container.mounts_volume("other"));
+    }
 
     #[test]
     fn parses_the_inspect_subset() {
