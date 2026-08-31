@@ -11,6 +11,7 @@ mod http;
 mod images;
 mod logs;
 mod networks;
+mod stats;
 mod stream;
 mod transport;
 mod volumes;
@@ -24,6 +25,7 @@ pub use endpoint::Endpoint;
 pub use images::{now_seconds, Image, ImageInspect, PullEvent};
 pub use logs::LogEvent;
 pub use networks::Network;
+pub use stats::{StatsEvent, StatsSample};
 pub use stream::StreamHandle;
 pub use volumes::Volume;
 
