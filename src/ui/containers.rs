@@ -9,8 +9,8 @@ use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{
     AlertDialog, Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label,
-    ListItem, Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection,
-    Widget, Window,
+    ListItem, Orientation, PolicyType, Revealer, ScrolledWindow, SignalListItemFactory,
+    SingleSelection, Widget, Window,
 };
 
 use super::object::ContainerObject;
@@ -25,6 +25,7 @@ const STYLE: &str = "
 .state-transitional{ color: #e5a50a; }
 .state-dead        { color: #e01b24; }
 .state-stopped     { color: alpha(currentColor, 0.45); }
+.docklet-banner    { background: alpha(#e01b24, 0.15); padding: 6px; }
 ";
 
 /// Every class `state_indicator` can apply, so a recycled row can be cleared.
@@ -42,8 +43,16 @@ pub struct ContainersPage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    /// The action bar; made insensitive while an action runs.
+    actions: GtkBox,
+    banner: Revealer,
+    banner_label: Label,
     /// Guards against a second refresh starting while one is in flight.
     refreshing: Rc<Cell<bool>>,
+    /// A refresh asked for while one was already running.
+    refresh_again: Rc<Cell<bool>>,
+    /// True while a lifecycle action is in flight.
+    busy: Rc<Cell<bool>>,
 }
 
 impl ContainersPage {
@@ -82,7 +91,33 @@ impl ContainersPage {
             .margin_end(6)
             .build();
 
+        let banner_label = Label::builder()
+            .halign(Align::Start)
+            .hexpand(true)
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+
+        let dismiss = Button::from_icon_name("window-close-symbolic");
+        dismiss.add_css_class("flat");
+        dismiss.set_tooltip_text(Some("Dismiss"));
+
+        let banner_box = GtkBox::new(Orientation::Horizontal, 6);
+        banner_box.add_css_class("docklet-banner");
+        banner_box.append(&banner_label);
+        banner_box.append(&dismiss);
+
+        let banner = Revealer::builder()
+            .child(&banner_box)
+            .reveal_child(false)
+            .build();
+        dismiss.connect_clicked({
+            let banner = banner.clone();
+            move |_| banner.set_reveal_child(false)
+        });
+
         let root = GtkBox::new(Orientation::Vertical, 0);
+        root.append(&banner);
         root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
@@ -93,7 +128,12 @@ impl ContainersPage {
             empty,
             store,
             selection,
+            actions: actions.clone(),
+            banner,
+            banner_label,
             refreshing: Rc::new(Cell::new(false)),
+            refresh_again: Rc::new(Cell::new(false)),
+            busy: Rc::new(Cell::new(false)),
         });
 
         actions.append(&page.action_button("Start", Docker::start_container));
@@ -112,8 +152,36 @@ impl ContainersPage {
         });
         actions.append(&remove);
 
+        // Actions need a selected container, so follow the selection.
+        page.selection.connect_selected_item_notify({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.sync_actions();
+                }
+            }
+        });
+
+        page.sync_actions();
         page.refresh();
         page
+    }
+
+    /// Enable the action bar only when it can actually do something.
+    fn sync_actions(&self) {
+        let ready = !self.busy.get() && self.selected().is_some();
+        self.actions.set_sensitive(ready);
+    }
+
+    /// Show a failure to the user, and log it.
+    fn show_error(&self, message: &str) {
+        glib::g_warning!(LOG_DOMAIN, "{message}");
+        self.banner_label.set_text(message);
+        self.banner.set_reveal_child(true);
+    }
+
+    fn clear_error(&self) {
+        self.banner.set_reveal_child(false);
     }
 
     /// The container the user has selected, if any.
@@ -151,6 +219,7 @@ impl ContainersPage {
         };
         let (id, name) = (row.id(), row.name());
         let parent = self.root.root().and_downcast::<Window>();
+        self.clear_error();
         let page = Rc::downgrade(self);
 
         glib::spawn_future_local(async move {
@@ -179,12 +248,16 @@ impl ContainersPage {
                         return;
                     }
                     if let Err(e) = remove(&id, true).await {
-                        glib::g_warning!(LOG_DOMAIN, "force remove failed: {e}");
+                        if let Some(page) = page.upgrade() {
+                            page.show_error(&format!("Could not force remove {name}. {e}"));
+                        }
                         return;
                     }
                 }
                 Err(e) => {
-                    glib::g_warning!(LOG_DOMAIN, "remove failed: {e}");
+                    if let Some(page) = page.upgrade() {
+                        page.show_error(&format!("Could not remove {name}. {e}"));
+                    }
                     return;
                 }
             }
@@ -204,20 +277,27 @@ impl ContainersPage {
         let Some(row) = self.selected() else {
             return;
         };
-        let id = row.id();
-        let page = Rc::downgrade(self);
+        let (id, name) = (row.id(), row.name());
 
+        self.clear_error();
+        self.busy.set(true);
+        self.sync_actions();
+
+        let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let outcome = gio::spawn_blocking(move || action(&Docker::connect()?, &id)).await;
 
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            page.busy.set(false);
+            page.sync_actions();
+
+            let verb = label.to_lowercase();
             match outcome {
-                Ok(Ok(())) => {
-                    if let Some(page) = page.upgrade() {
-                        page.refresh();
-                    }
-                }
-                Ok(Err(e)) => glib::g_warning!(LOG_DOMAIN, "{label} failed: {e}"),
-                Err(_) => glib::g_warning!(LOG_DOMAIN, "{label} panicked"),
+                Ok(Ok(())) => page.refresh(),
+                Ok(Err(e)) => page.show_error(&format!("Could not {verb} {name}. {e}")),
+                Err(_) => page.show_error(&format!("Could not {verb} {name}.")),
             }
         });
     }
@@ -230,32 +310,41 @@ impl ContainersPage {
     ///
     /// Does nothing if a refresh is already running, so holding the button down
     /// cannot pile up requests.
-    pub fn refresh(&self) {
+    pub fn refresh(self: &Rc<Self>) {
         if self.refreshing.replace(true) {
+            // A refresh is already running, and it may have read Docker before
+            // whatever prompted this one. Queue a second pass rather than
+            // dropping the request and showing stale state.
+            self.refresh_again.set(true);
             return;
         }
 
-        let store = self.store.clone();
-        let refreshing = self.refreshing.clone();
-        let scrolled = self.scrolled.clone();
-        let empty = self.empty.clone();
-
+        let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.containers(true)).await;
 
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+
             match listed {
                 Ok(Ok(containers)) => {
-                    apply(&store, &containers);
+                    apply(&page.store, &containers);
                     // Only after a completed load, so an empty grid during the
                     // first fetch is never mistaken for "no containers".
-                    let is_empty = store.n_items() == 0;
-                    empty.set_visible(is_empty);
-                    scrolled.set_visible(!is_empty);
+                    let is_empty = page.store.n_items() == 0;
+                    page.empty.set_visible(is_empty);
+                    page.scrolled.set_visible(!is_empty);
+                    page.sync_actions();
                 }
-                Ok(Err(e)) => glib::g_warning!(LOG_DOMAIN, "could not list containers: {e}"),
-                Err(_) => glib::g_warning!(LOG_DOMAIN, "listing containers panicked"),
+                Ok(Err(e)) => page.show_error(&format!("Could not list containers. {e}")),
+                Err(_) => page.show_error("Could not list containers."),
             }
-            refreshing.set(false);
+
+            page.refreshing.set(false);
+            if page.refresh_again.replace(false) {
+                page.refresh();
+            }
         });
     }
 }
