@@ -1,7 +1,10 @@
 //! The container detail pane.
 
 use gtk::prelude::*;
-use gtk::{Align, Box as GtkBox, Button, Grid, Label, Orientation, Separator, Widget};
+use gtk::{
+    Align, Box as GtkBox, Button, Grid, Label, Orientation, PolicyType, ScrolledWindow, Separator,
+    TextView, Widget,
+};
 
 use super::object::ContainerObject;
 use crate::docker::Inspect;
@@ -21,6 +24,7 @@ pub struct DetailView {
     restart: Label,
     networks: Label,
     mounts: Label,
+    logs: TextView,
 }
 
 impl DetailView {
@@ -62,10 +66,38 @@ impl DetailView {
         let networks = field(&grid, 8, "Networks", false);
         let mounts = field(&grid, 9, "Mounts", false);
 
+        let logs = TextView::builder()
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .left_margin(6)
+            .right_margin(6)
+            .top_margin(6)
+            .bottom_margin(6)
+            .build();
+
+        let logs_scroll = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .child(&logs)
+            .build();
+
+        let logs_header = Label::builder()
+            .label("Logs")
+            .halign(Align::Start)
+            .margin_start(12)
+            .margin_top(6)
+            .margin_bottom(6)
+            .build();
+        logs_header.add_css_class("heading");
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(&header);
         root.append(&Separator::new(Orientation::Horizontal));
         root.append(&grid);
+        root.append(&Separator::new(Orientation::Horizontal));
+        root.append(&logs_header);
+        root.append(&logs_scroll);
         root.set_visible(false);
 
         DetailView {
@@ -82,6 +114,7 @@ impl DetailView {
             restart,
             networks,
             mounts,
+            logs,
         }
     }
 
@@ -118,6 +151,12 @@ impl DetailView {
         ] {
             label.set_text("");
         }
+        self.set_logs("");
+    }
+
+    /// Replace the log view's contents.
+    pub fn set_logs(&self, text: &str) {
+        self.logs.buffer().set_text(text);
     }
 
     /// Fill in the fields that only a full inspect provides.

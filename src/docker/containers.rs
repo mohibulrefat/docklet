@@ -99,6 +99,10 @@ pub struct Inspect {
 pub struct InspectConfig {
     #[serde(rename = "Cmd", default, deserialize_with = "null_as_default")]
     pub cmd: Vec<String>,
+    /// Whether the container has a TTY, which decides whether its log stream
+    /// is framed or raw.
+    #[serde(rename = "Tty", default)]
+    pub tty: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -19,6 +19,10 @@ use crate::docker::{Container, Docker, DockerError};
 
 const LOG_DOMAIN: &str = "docklet";
 
+/// How many log lines to fetch. Bounded so a chatty container cannot fill
+/// memory just by being opened.
+const LOG_TAIL: usize = 500;
+
 /// Colours for the state bullet. `alpha(currentColor, …)` follows the theme,
 /// so the stopped bullet stays legible in both light and dark.
 const STYLE: &str = "
@@ -210,6 +214,7 @@ impl ContainersPage {
     /// Fetch the fields only a full inspect provides.
     fn load_inspect(self: &Rc<Self>, id: &str) {
         let id = id.to_string();
+        let id_for_logs = id.clone();
         let page = Rc::downgrade(self);
 
         glib::spawn_future_local(async move {
@@ -220,9 +225,34 @@ impl ContainersPage {
                 return;
             };
             match inspected {
-                Ok(Ok(inspect)) => page.detail.set_inspect(&inspect),
+                Ok(Ok(inspect)) => {
+                    page.detail.set_inspect(&inspect);
+                    // Framing depends on the TTY flag, so logs wait for inspect.
+                    page.load_logs(&id_for_logs, inspect.config.tty);
+                }
                 Ok(Err(e)) => page.show_error(&format!("Could not inspect container. {e}")),
                 Err(_) => page.show_error("Could not inspect container."),
+            }
+        });
+    }
+
+    /// Fetch the tail of the container's logs.
+    fn load_logs(self: &Rc<Self>, id: &str, tty: bool) {
+        let id = id.to_string();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let fetched =
+                gio::spawn_blocking(move || Docker::connect()?.container_logs(&id, tty, LOG_TAIL))
+                    .await;
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match fetched {
+                Ok(Ok(text)) => page.detail.set_logs(&text),
+                Ok(Err(e)) => page.show_error(&format!("Could not read logs. {e}")),
+                Err(_) => page.show_error("Could not read logs."),
             }
         });
     }

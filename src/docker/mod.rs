@@ -8,6 +8,7 @@
 mod containers;
 mod endpoint;
 mod http;
+mod logs;
 mod transport;
 
 use std::fmt;
