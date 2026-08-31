@@ -1,3 +1,5 @@
+mod docker;
+
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow};
