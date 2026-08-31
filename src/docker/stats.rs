@@ -12,7 +12,7 @@ use async_channel::Sender;
 use serde::Deserialize;
 
 use super::stream::{StreamEvent, StreamHandle};
-use super::{Docker, DockerError};
+use super::Docker;
 
 /// One JSON line of `/containers/{id}/stats?stream=1`.
 ///
@@ -66,6 +66,29 @@ pub struct NetworkStats {
     pub rx_bytes: u64,
     #[serde(rename = "tx_bytes", default)]
     pub tx_bytes: u64,
+}
+
+impl StatsSample {
+    /// CPU usage as a percentage of one core's capacity, scaled by the number
+    /// of online CPUs — the same formula `docker stats` uses.
+    ///
+    /// `None` on a container's first sample, where Docker has not taken a
+    /// second reading yet and `precpu_stats.system_cpu_usage` is absent. That
+    /// is a real "no data yet", not a 0%, and must not be displayed as one.
+    pub fn cpu_percent(&self) -> Option<f64> {
+        let system_now = self.cpu_stats.system_cpu_usage?;
+        let system_then = self.precpu_stats.system_cpu_usage?;
+
+        let cpu_delta = self.cpu_stats.cpu_usage.total_usage as f64
+            - self.precpu_stats.cpu_usage.total_usage as f64;
+        let system_delta = system_now as f64 - system_then as f64;
+
+        if system_delta <= 0.0 || self.cpu_stats.online_cpus == 0 {
+            return None;
+        }
+
+        Some((cpu_delta / system_delta) * self.cpu_stats.online_cpus as f64 * 100.0)
+    }
 }
 
 /// What a stats stream delivers.
@@ -147,6 +170,36 @@ mod tests {
         let sample: StatsSample = serde_json::from_str(FIRST_SAMPLE).unwrap();
         assert_eq!(sample.precpu_stats.system_cpu_usage, None);
         assert_eq!(sample.cpu_stats.system_cpu_usage, Some(224315250000000));
+    }
+
+    #[test]
+    fn computes_cpu_percent_from_two_samples() {
+        let sample: StatsSample = serde_json::from_str(SAMPLE).unwrap();
+        // (76337000 - 60000000) / (224145870000000 - 224137970000000) * 8 * 100
+        let percent = sample.cpu_percent().expect("both readings present");
+        assert!((percent - 1.655).abs() < 0.01, "got {percent}");
+    }
+
+    #[test]
+    fn returns_none_when_precpu_is_missing() {
+        let sample: StatsSample = serde_json::from_str(FIRST_SAMPLE).unwrap();
+        assert_eq!(
+            sample.cpu_percent(),
+            None,
+            "first sample has no baseline yet"
+        );
+    }
+
+    #[test]
+    fn returns_none_rather_than_dividing_by_zero() {
+        // A system_cpu_usage that has not advanced would otherwise divide by
+        // zero or produce a nonsensical negative percentage.
+        let sample: StatsSample = serde_json::from_str(
+            r#"{"cpu_stats": {"cpu_usage": {"total_usage": 100}, "system_cpu_usage": 5000, "online_cpus": 4},
+                "precpu_stats": {"cpu_usage": {"total_usage": 50}, "system_cpu_usage": 5000}}"#,
+        )
+        .unwrap();
+        assert_eq!(sample.cpu_percent(), None);
     }
 
     #[test]

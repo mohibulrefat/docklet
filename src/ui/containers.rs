@@ -17,7 +17,7 @@ use super::detail::DetailView;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column};
 use super::object::ContainerObject;
-use crate::docker::{Docker, DockerError, LogEvent, StreamHandle};
+use crate::docker::{Docker, DockerError, LogEvent, StatsEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -66,6 +66,10 @@ pub struct ContainersPage {
     /// The live log stream, if Follow is on. Dropping it stops the worker,
     /// so replacing or clearing this is what tears the stream down.
     follow: RefCell<Option<StreamHandle>>,
+    /// The stats stream for the open detail pane. Exactly one at a time,
+    /// structurally: opening a detail pane replaces this, and closing one
+    /// clears it — there is no path that leaves two running.
+    stats: RefCell<Option<StreamHandle>>,
 }
 
 impl ContainersPage {
@@ -141,6 +145,7 @@ impl ContainersPage {
             busy: Rc::new(Cell::new(false)),
             open_container: RefCell::new(None),
             follow: RefCell::new(None),
+            stats: RefCell::new(None),
         });
 
         actions.append(&page.action_button("Start", Docker::start_container));
@@ -228,6 +233,41 @@ impl ContainersPage {
         self.detail.set_visible(true);
 
         self.load_inspect(&row.id());
+        self.start_stats(&row.id());
+    }
+
+    /// Begin streaming CPU and memory for the open container.
+    ///
+    /// One stream only, for whichever container is currently open; replacing
+    /// `self.stats` drops and stops any previous one.
+    fn start_stats(self: &Rc<Self>, id: &str) {
+        let (sender, receiver) = async_channel::bounded::<StatsEvent>(16);
+
+        let handle = match Docker::connect() {
+            Ok(docker) => docker.follow_stats(id, sender),
+            Err(_) => return, // Already reported by the status footer.
+        };
+        self.stats.replace(Some(handle));
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(event) = receiver.recv().await {
+                let Some(page) = page.upgrade() else {
+                    return;
+                };
+                match event {
+                    StatsEvent::Sample(sample) => {
+                        page.detail.set_stats(sample.cpu_percent());
+                    }
+                    StatsEvent::Failed(_) => {
+                        // The container likely stopped; that ends the stream
+                        // naturally rather than being an error worth a banner.
+                        page.detail.clear_stats();
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// Fetch the fields only a full inspect provides.
@@ -344,6 +384,10 @@ impl ContainersPage {
     fn close_detail(self: &Rc<Self>) {
         self.stop_follow();
         self.detail.set_following(false);
+        // Dropping the handle stops the worker; nothing keeps sampling once
+        // the pane that showed the numbers is gone.
+        self.stats.replace(None);
+        self.detail.clear_stats();
         self.open_container.replace(None);
         self.detail.set_visible(false);
         self.actions.set_visible(true);

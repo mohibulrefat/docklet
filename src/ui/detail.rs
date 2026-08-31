@@ -32,6 +32,7 @@ pub struct DetailView {
     logs_scroll: ScrolledWindow,
     logs_refresh: Button,
     follow: ToggleButton,
+    cpu: Label,
 }
 
 impl DetailView {
@@ -67,11 +68,12 @@ impl DetailView {
         let image = field(&grid, 2, "Image", false);
         let state = field(&grid, 3, "State", false);
         let status = field(&grid, 4, "Status", false);
-        let created = field(&grid, 5, "Created", false);
-        let command = field(&grid, 6, "Command", true);
-        let restart = field(&grid, 7, "Restart", false);
-        let networks = field(&grid, 8, "Networks", false);
-        let mounts = field(&grid, 9, "Mounts", false);
+        let cpu = field(&grid, 5, "CPU", false);
+        let created = field(&grid, 6, "Created", false);
+        let command = field(&grid, 7, "Command", true);
+        let restart = field(&grid, 8, "Restart", false);
+        let networks = field(&grid, 9, "Networks", false);
+        let mounts = field(&grid, 10, "Mounts", false);
 
         let logs = TextView::builder()
             .editable(false)
@@ -142,6 +144,7 @@ impl DetailView {
             logs_scroll,
             logs_refresh,
             follow,
+            cpu,
         }
     }
 
@@ -220,10 +223,27 @@ impl DetailView {
             &self.restart,
             &self.networks,
             &self.mounts,
+            &self.cpu,
         ] {
             label.set_text("");
         }
         self.set_logs("");
+    }
+
+    /// Update the live CPU reading. Called for each sample while stats are
+    /// running; does nothing to the rest of the pane.
+    pub fn set_stats(&self, cpu_percent: Option<f64>) {
+        self.cpu.set_text(&match cpu_percent {
+            Some(percent) => format!("{percent:.1}%"),
+            // A real "no data yet", not a fabricated 0%.
+            None => "—".to_string(),
+        });
+    }
+
+    /// Stats stopped or never started for this container; show nothing rather
+    /// than a stale reading from whatever was open before.
+    pub fn clear_stats(&self) {
+        self.cpu.set_text("");
     }
 
     /// Replace the log view's contents.
