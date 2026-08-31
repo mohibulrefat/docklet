@@ -4,13 +4,13 @@
 //! plain fields rather than GObject properties: nothing binds to them, and the
 //! property machinery would be weight for no gain.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use gtk::glib;
 use gtk::subclass::prelude::*;
 
 use super::list::Row;
-use crate::docker::{Container, Image, Volume};
+use crate::docker::{Container, Image, Network, Volume};
 
 mod imp {
     use super::*;
@@ -235,5 +235,68 @@ impl VolumeObject {
 
     pub fn mountpoint(&self) -> String {
         self.imp().mountpoint.borrow().clone()
+    }
+}
+
+mod network_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct NetworkObject {
+        pub id: RefCell<String>,
+        pub name: RefCell<String>,
+        pub driver: RefCell<String>,
+        pub scope: RefCell<String>,
+        pub predefined: Cell<bool>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for NetworkObject {
+        const NAME: &'static str = "DockletNetworkObject";
+        type Type = super::NetworkObject;
+    }
+
+    impl ObjectImpl for NetworkObject {}
+}
+
+glib::wrapper! {
+    pub struct NetworkObject(ObjectSubclass<network_imp::NetworkObject>);
+}
+
+impl NetworkObject {
+    pub fn new(network: &Network) -> Self {
+        let object: Self = glib::Object::new();
+        object.set(network);
+        object
+    }
+
+    pub fn set(&self, network: &Network) {
+        let imp = self.imp();
+        imp.id.replace(network.id.clone());
+        imp.name.replace(network.name.clone());
+        imp.driver.replace(network.driver.clone());
+        imp.scope.replace(network.scope.clone());
+        imp.predefined.set(network.is_predefined());
+    }
+
+    pub fn id(&self) -> String {
+        self.imp().id.borrow().clone()
+    }
+
+    pub fn name(&self) -> String {
+        self.imp().name.borrow().clone()
+    }
+
+    pub fn driver(&self) -> String {
+        self.imp().driver.borrow().clone()
+    }
+
+    pub fn scope(&self) -> String {
+        self.imp().scope.borrow().clone()
+    }
+
+    /// Docker owns this network and will not let it be removed.
+    pub fn is_predefined(&self) -> bool {
+        self.imp().predefined.get()
     }
 }
