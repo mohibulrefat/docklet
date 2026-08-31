@@ -53,6 +53,20 @@ impl ContainerObject {
         imp.status.replace(container.status.clone());
     }
 
+    /// Whether this row already shows exactly this container.
+    ///
+    /// Refreshes are frequent and usually change nothing; comparing first means
+    /// an unchanged row is never rebound, so it neither flickers nor disturbs
+    /// the selection.
+    pub fn matches(&self, container: &Container) -> bool {
+        let imp = self.imp();
+        *imp.id.borrow() == container.id
+            && *imp.name.borrow() == container.name()
+            && *imp.image.borrow() == container.image
+            && *imp.state.borrow() == container.state
+            && *imp.status.borrow() == container.status
+    }
+
     pub fn id(&self) -> String {
         self.imp().id.borrow().clone()
     }

@@ -1,5 +1,8 @@
 //! The containers page.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
@@ -9,7 +12,7 @@ use gtk::{
 };
 
 use super::object::ContainerObject;
-use crate::docker::Docker;
+use crate::docker::{Container, Docker};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -34,6 +37,8 @@ const STATE_CLASSES: [&str; 4] = [
 pub struct ContainersPage {
     root: ScrolledWindow,
     store: gio::ListStore,
+    /// Guards against a second refresh starting while one is in flight.
+    refreshing: Rc<Cell<bool>>,
 }
 
 impl ContainersPage {
@@ -55,7 +60,11 @@ impl ContainersPage {
             .child(&view)
             .build();
 
-        let page = ContainersPage { root, store };
+        let page = ContainersPage {
+            root,
+            store,
+            refreshing: Rc::new(Cell::new(false)),
+        };
         page.refresh();
         page
     }
@@ -65,23 +74,76 @@ impl ContainersPage {
     }
 
     /// Reload the list from Docker.
+    ///
+    /// Does nothing if a refresh is already running, so holding the button down
+    /// cannot pile up requests.
     pub fn refresh(&self) {
+        if self.refreshing.replace(true) {
+            return;
+        }
+
         let store = self.store.clone();
+        let refreshing = self.refreshing.clone();
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.containers(true)).await;
 
             match listed {
-                Ok(Ok(containers)) => {
-                    store.remove_all();
-                    for container in &containers {
-                        store.append(&ContainerObject::new(container));
-                    }
-                }
+                Ok(Ok(containers)) => apply(&store, &containers),
                 Ok(Err(e)) => glib::g_warning!(LOG_DOMAIN, "could not list containers: {e}"),
                 Err(_) => glib::g_warning!(LOG_DOMAIN, "listing containers panicked"),
             }
+            refreshing.set(false);
         });
     }
+}
+
+/// Bring the store into line with a freshly fetched list.
+///
+/// Rows are matched by container id and updated in place rather than the store
+/// being cleared and refilled: that keeps the selection, avoids flicker, and
+/// leaves rows whose values did not change completely untouched.
+fn apply(store: &gio::ListStore, containers: &[Container]) {
+    for (index, container) in containers.iter().enumerate() {
+        let index = index as u32;
+
+        match find(store, &container.id, index) {
+            Some(found) if found == index => {
+                let row = row_at(store, index);
+                if !row.matches(container) {
+                    row.set(container);
+                    // No properties to notify, so ask the view to rebind.
+                    store.items_changed(index, 1, 1);
+                }
+            }
+            Some(found) => {
+                // Same container, different position: move it rather than
+                // rebuilding, so its row keeps its identity.
+                let row = row_at(store, found);
+                store.remove(found);
+                row.set(container);
+                store.insert(index, &row);
+            }
+            None => store.insert(index, &ContainerObject::new(container)),
+        }
+    }
+
+    // Anything past the new length is gone from Docker.
+    while store.n_items() > containers.len() as u32 {
+        store.remove(store.n_items() - 1);
+    }
+}
+
+/// Position of the row for `id`, searching from `from` onwards.
+fn find(store: &gio::ListStore, id: &str, from: u32) -> Option<u32> {
+    (from..store.n_items()).find(|&i| row_at(store, i).id() == id)
+}
+
+fn row_at(store: &gio::ListStore, index: u32) -> ContainerObject {
+    store
+        .item(index)
+        .and_downcast::<ContainerObject>()
+        .expect("the store only ever holds ContainerObjects")
 }
 
 /// A column showing one text field of a container.
@@ -180,6 +242,115 @@ fn install_style() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a container with just the fields the store compares.
+    fn container(id: &str, name: &str, state: &str) -> Container {
+        serde_json::from_str(&format!(
+            r#"{{"Id":"{id}","Names":["/{name}"],"Image":"img","State":"{state}",
+                 "Status":"status-{state}"}}"#
+        ))
+        .expect("fixture should parse")
+    }
+
+    fn store_of(containers: &[Container]) -> gio::ListStore {
+        let store = gio::ListStore::new::<ContainerObject>();
+        apply(&store, containers);
+        store
+    }
+
+    fn ids(store: &gio::ListStore) -> Vec<String> {
+        (0..store.n_items())
+            .map(|i| row_at(store, i).id())
+            .collect()
+    }
+
+    #[test]
+    fn fills_an_empty_store() {
+        let store = store_of(&[container("a", "one", "running")]);
+        assert_eq!(ids(&store), ["a"]);
+        assert_eq!(row_at(&store, 0).name(), "one");
+    }
+
+    #[test]
+    fn appends_a_new_container() {
+        let store = store_of(&[container("a", "one", "running")]);
+        apply(
+            &store,
+            &[
+                container("a", "one", "running"),
+                container("b", "two", "exited"),
+            ],
+        );
+        assert_eq!(ids(&store), ["a", "b"]);
+    }
+
+    #[test]
+    fn removes_a_departed_container() {
+        let store = store_of(&[
+            container("a", "one", "running"),
+            container("b", "two", "exited"),
+        ]);
+        apply(&store, &[container("b", "two", "exited")]);
+        assert_eq!(ids(&store), ["b"]);
+    }
+
+    #[test]
+    fn removes_every_container() {
+        let store = store_of(&[container("a", "one", "running")]);
+        apply(&store, &[]);
+        assert_eq!(store.n_items(), 0);
+    }
+
+    #[test]
+    fn updates_a_changed_container_in_place() {
+        let store = store_of(&[container("a", "one", "running")]);
+        let before = row_at(&store, 0);
+
+        apply(&store, &[container("a", "one", "exited")]);
+
+        let after = row_at(&store, 0);
+        assert_eq!(after.state(), "exited");
+        // Same GObject, not a replacement: the row kept its identity.
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn keeps_the_same_row_object_when_nothing_changed() {
+        let store = store_of(&[container("a", "one", "running")]);
+        let before = row_at(&store, 0);
+
+        apply(&store, &[container("a", "one", "running")]);
+
+        assert_eq!(before, row_at(&store, 0));
+        assert!(before.matches(&container("a", "one", "running")));
+    }
+
+    #[test]
+    fn reorders_without_rebuilding_rows() {
+        let a = container("a", "one", "running");
+        let b = container("b", "two", "exited");
+        let store = store_of(&[a.clone(), b.clone()]);
+        let row_a = row_at(&store, 0);
+
+        apply(&store, &[b, a]);
+
+        assert_eq!(ids(&store), ["b", "a"]);
+        // "a" moved rather than being recreated.
+        assert_eq!(row_a, row_at(&store, 1));
+    }
+
+    #[test]
+    fn handles_a_wholesale_replacement() {
+        let store = store_of(&[container("a", "one", "running")]);
+        apply(
+            &store,
+            &[
+                container("x", "nine", "exited"),
+                container("y", "ten", "dead"),
+            ],
+        );
+        assert_eq!(ids(&store), ["x", "y"]);
+    }
 
     fn class(state: &str) -> &'static str {
         state_indicator(state).1

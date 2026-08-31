@@ -6,9 +6,11 @@
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use gtk::{
-    Align, Application, ApplicationWindow, HeaderBar, Label, Orientation, Separator, Stack,
+    Align, Application, ApplicationWindow, Button, HeaderBar, Label, Orientation, Separator, Stack,
     StackSwitcher,
 };
+
+use std::rc::Rc;
 
 use super::containers::ContainersPage;
 use crate::docker::Docker;
@@ -19,7 +21,7 @@ const DEFAULT_HEIGHT: i32 = 600;
 
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
-    let containers = ContainersPage::new();
+    let containers = Rc::new(ContainersPage::new());
 
     let stack = Stack::builder().vexpand(true).build();
     stack.add_titled(containers.widget(), Some("containers"), "Containers");
@@ -27,8 +29,16 @@ pub fn build(app: &Application) -> ApplicationWindow {
     stack.add_titled(&placeholder("Volumes"), Some("volumes"), "Volumes");
     stack.add_titled(&placeholder("Networks"), Some("networks"), "Networks");
 
+    let refresh = Button::from_icon_name("view-refresh-symbolic");
+    refresh.set_tooltip_text(Some("Refresh"));
+    refresh.connect_clicked({
+        let containers = containers.clone();
+        move |_| containers.refresh()
+    });
+
     let header = HeaderBar::new();
     header.set_title_widget(Some(&StackSwitcher::builder().stack(&stack).build()));
+    header.pack_start(&refresh);
 
     let status = status_bar();
     check_docker(&status);
