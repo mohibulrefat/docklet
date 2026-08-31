@@ -574,6 +574,11 @@ impl ContainersPage {
             let verb = label.to_lowercase();
             match outcome {
                 Ok(Ok(())) => page.refresh(),
+                // A container removed by something else between the list
+                // loading and the action running is not a failure the user
+                // needs to see a banner about: refreshing shows the row gone,
+                // which already says what happened.
+                Ok(Err(DockerError::Api { status: 404, .. })) => page.refresh(),
                 Ok(Err(e)) => page.show_error(&format!("Could not {verb} {name}. {e}")),
                 Err(_) => page.show_error(&format!("Could not {verb} {name}.")),
             }
