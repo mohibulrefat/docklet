@@ -8,8 +8,9 @@ use gtk::glib;
 use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem,
-    Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, Widget,
+    AlertDialog, Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label,
+    ListItem, Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection,
+    Widget, Window,
 };
 
 use super::object::ContainerObject;
@@ -99,6 +100,18 @@ impl ContainersPage {
         actions.append(&page.action_button("Stop", Docker::stop_container));
         actions.append(&page.action_button("Restart", Docker::restart_container));
 
+        let remove = Button::with_label("Remove");
+        remove.add_css_class("destructive-action");
+        remove.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.remove_selected();
+                }
+            }
+        });
+        actions.append(&remove);
+
         page.refresh();
         page
     }
@@ -126,6 +139,60 @@ impl ContainersPage {
             page.act(label, action);
         });
         button
+    }
+
+    /// Remove the selected container, after confirming.
+    ///
+    /// Docker refuses to remove a running container with a 409; rather than
+    /// reporting that as a failure, we offer to stop it first.
+    fn remove_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let (id, name) = (row.id(), row.name());
+        let parent = self.root.root().and_downcast::<Window>();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let confirmed = confirm(
+                parent.as_ref(),
+                &format!("Remove {name}?"),
+                "The container and its writable layer are deleted. This cannot be undone.",
+                "Remove",
+            )
+            .await;
+            if !confirmed {
+                return;
+            }
+
+            match remove(&id, false).await {
+                Ok(()) => {}
+                Err(DockerError::Api { status: 409, .. }) => {
+                    let forced = confirm(
+                        parent.as_ref(),
+                        &format!("{name} is still running."),
+                        "Removing it will stop the container first.",
+                        "Force remove",
+                    )
+                    .await;
+                    if !forced {
+                        return;
+                    }
+                    if let Err(e) = remove(&id, true).await {
+                        glib::g_warning!(LOG_DOMAIN, "force remove failed: {e}");
+                        return;
+                    }
+                }
+                Err(e) => {
+                    glib::g_warning!(LOG_DOMAIN, "remove failed: {e}");
+                    return;
+                }
+            }
+
+            if let Some(page) = page.upgrade() {
+                page.refresh();
+            }
+        });
     }
 
     /// Run an action against the selected container, then reload the list.
@@ -191,6 +258,32 @@ impl ContainersPage {
             refreshing.set(false);
         });
     }
+}
+
+/// Ask the user to confirm a destructive action.
+///
+/// Cancel is both the default and the cancel button, so a stray Return or
+/// Escape never deletes anything.
+async fn confirm(parent: Option<&Window>, message: &str, detail: &str, action: &str) -> bool {
+    let dialog = AlertDialog::builder()
+        .modal(true)
+        .message(message)
+        .detail(detail)
+        .buttons(["Cancel", action])
+        .cancel_button(0)
+        .default_button(0)
+        .build();
+
+    // An error means the dialog was dismissed, which is a "no".
+    dialog.choose_future(parent).await == Ok(1)
+}
+
+/// Remove a container off the main thread.
+async fn remove(id: &str, force: bool) -> Result<(), DockerError> {
+    let id = id.to_string();
+    gio::spawn_blocking(move || Docker::connect()?.remove_container(&id, force))
+        .await
+        .unwrap_or_else(|_| Err(DockerError::Protocol("the remove task panicked".into())))
 }
 
 /// Bring the store into line with a freshly fetched list.

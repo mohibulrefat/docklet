@@ -117,6 +117,12 @@ impl Docker {
         Ok(())
     }
 
+    /// DELETE a path, discarding the response.
+    pub fn delete(&self, path: &str) -> Result<(), DockerError> {
+        self.request("DELETE", path, None)?;
+        Ok(())
+    }
+
     /// Check that the daemon is alive.
     ///
     /// `/_ping` is the cheapest endpoint Docker offers — it answers `OK` and
@@ -371,6 +377,39 @@ mod tests {
             server.request_line(),
             "POST /containers/abc123/restart HTTP/1.1"
         );
+    }
+
+    #[test]
+    fn removes_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_container("abc123", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /containers/abc123 HTTP/1.1");
+    }
+
+    #[test]
+    fn asks_for_force_when_told_to() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_container("abc123", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /containers/abc123?force=true HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn reports_a_running_container_as_a_conflict() {
+        // 409 is what the UI keys on to offer a forced removal.
+        let server = serve(with_length(
+            "409 Conflict",
+            r#"{"message":"You cannot remove a running container"}"#,
+        ));
+        match server.docker.remove_container("abc123", false) {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 409);
+                assert!(message.contains("running container"));
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
     }
 
     #[test]

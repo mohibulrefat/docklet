@@ -93,6 +93,20 @@ impl Docker {
     pub fn restart_container(&self, id: &str) -> Result<(), DockerError> {
         self.post(&format!("/containers/{id}/restart"))
     }
+
+    /// Remove a container.
+    ///
+    /// Removing a running container is a 409 unless `force` is set. Named
+    /// volumes are always left alone — Docker only removes anonymous ones, and
+    /// only when asked, which Docklet never does.
+    pub fn remove_container(&self, id: &str, force: bool) -> Result<(), DockerError> {
+        let path = if force {
+            format!("/containers/{id}?force=true")
+        } else {
+            format!("/containers/{id}")
+        };
+        self.delete(&path)
+    }
 }
 
 #[cfg(test)]
