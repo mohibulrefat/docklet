@@ -5,10 +5,11 @@ use std::rc::Rc;
 
 use gtk::gio;
 use gtk::glib;
+use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{
-    Align, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem, PolicyType, ScrolledWindow,
-    SignalListItemFactory, SingleSelection, Widget,
+    Align, Box as GtkBox, ColumnView, ColumnViewColumn, CssProvider, Label, ListItem, Orientation,
+    PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, Widget,
 };
 
 use super::object::ContainerObject;
@@ -35,7 +36,9 @@ const STATE_CLASSES: [&str; 4] = [
 
 /// The containers list, and the store backing it.
 pub struct ContainersPage {
-    root: ScrolledWindow,
+    root: GtkBox,
+    scrolled: ScrolledWindow,
+    empty: Label,
     store: gio::ListStore,
     /// Guards against a second refresh starting while one is in flight.
     refreshing: Rc<Cell<bool>>,
@@ -52,16 +55,30 @@ impl ContainersPage {
         view.append_column(&state_column());
         view.append_column(&text_column("Name", ContainerObject::name));
         view.append_column(&text_column("Image", ContainerObject::image));
+        view.append_column(&mono_column("ID", ContainerObject::short_id));
         view.append_column(&text_column("Status", ContainerObject::status));
 
-        let root = ScrolledWindow::builder()
+        let scrolled = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Automatic)
             .vexpand(true)
             .child(&view)
             .build();
 
+        let empty = Label::builder()
+            .label("No containers")
+            .vexpand(true)
+            .visible(false)
+            .build();
+        empty.add_css_class("dim-label");
+
+        let root = GtkBox::new(Orientation::Vertical, 0);
+        root.append(&scrolled);
+        root.append(&empty);
+
         let page = ContainersPage {
             root,
+            scrolled,
+            empty,
             store,
             refreshing: Rc::new(Cell::new(false)),
         };
@@ -84,12 +101,21 @@ impl ContainersPage {
 
         let store = self.store.clone();
         let refreshing = self.refreshing.clone();
+        let scrolled = self.scrolled.clone();
+        let empty = self.empty.clone();
 
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.containers(true)).await;
 
             match listed {
-                Ok(Ok(containers)) => apply(&store, &containers),
+                Ok(Ok(containers)) => {
+                    apply(&store, &containers);
+                    // Only after a completed load, so an empty grid during the
+                    // first fetch is never mistaken for "no containers".
+                    let is_empty = store.n_items() == 0;
+                    empty.set_visible(is_empty);
+                    scrolled.set_visible(!is_empty);
+                }
                 Ok(Err(e)) => glib::g_warning!(LOG_DOMAIN, "could not list containers: {e}"),
                 Err(_) => glib::g_warning!(LOG_DOMAIN, "listing containers panicked"),
             }
@@ -146,12 +172,32 @@ fn row_at(store: &gio::ListStore, index: u32) -> ContainerObject {
         .expect("the store only ever holds ContainerObjects")
 }
 
-/// A column showing one text field of a container.
+/// A column of text that shares the remaining width and truncates when narrow.
 fn text_column(title: &str, field: fn(&ContainerObject) -> String) -> ColumnViewColumn {
+    column(title, field, false, true)
+}
+
+/// A fixed-width column of monospace text, for ids.
+fn mono_column(title: &str, field: fn(&ContainerObject) -> String) -> ColumnViewColumn {
+    column(title, field, true, false)
+}
+
+fn column(
+    title: &str,
+    field: fn(&ContainerObject) -> String,
+    monospace: bool,
+    expand: bool,
+) -> ColumnViewColumn {
     let factory = SignalListItemFactory::new();
 
-    factory.connect_setup(|_, item| {
-        let label = Label::builder().halign(Align::Start).build();
+    factory.connect_setup(move |_, item| {
+        let label = Label::builder()
+            .halign(Align::Start)
+            .ellipsize(EllipsizeMode::End)
+            .build();
+        if monospace {
+            label.add_css_class("monospace");
+        }
         item.downcast_ref::<ListItem>()
             .expect("list item")
             .set_child(Some(&label));
@@ -171,6 +217,8 @@ fn text_column(title: &str, field: fn(&ContainerObject) -> String) -> ColumnView
     ColumnViewColumn::builder()
         .title(title)
         .factory(&factory)
+        .expand(expand)
+        .resizable(true)
         .build()
 }
 

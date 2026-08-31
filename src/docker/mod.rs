@@ -14,7 +14,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-pub use containers::Container;
+pub use containers::{short_id, Container};
 pub use endpoint::Endpoint;
 
 /// Everything that can go wrong talking to Docker.

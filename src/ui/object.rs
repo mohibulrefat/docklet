@@ -71,6 +71,11 @@ impl ContainerObject {
         self.imp().id.borrow().clone()
     }
 
+    /// The 12-character id Docker displays.
+    pub fn short_id(&self) -> String {
+        crate::docker::short_id(&self.imp().id.borrow()).to_string()
+    }
+
     pub fn name(&self) -> String {
         self.imp().name.borrow().clone()
     }

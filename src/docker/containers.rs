@@ -42,13 +42,14 @@ impl Container {
 
     /// The first 12 characters of the id — what Docker itself displays.
     pub fn short_id(&self) -> &str {
-        let end = self
-            .id
-            .char_indices()
-            .nth(12)
-            .map_or(self.id.len(), |(i, _)| i);
-        &self.id[..end]
+        short_id(&self.id)
     }
+}
+
+/// Shorten a container id to the 12 characters Docker displays.
+pub fn short_id(id: &str) -> &str {
+    let end = id.char_indices().nth(12).map_or(id.len(), |(i, _)| i);
+    &id[..end]
 }
 
 /// Treat an explicit `null` as an empty value.
