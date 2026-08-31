@@ -3,11 +3,15 @@
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GtkBox, Button, Grid, Label, Orientation, PolicyType, ScrolledWindow, Separator,
-    TextView, Widget,
+    TextView, ToggleButton, Widget,
 };
 
 use super::object::ContainerObject;
 use crate::docker::Inspect;
+
+/// How many log lines to keep in view. Bounded so following a chatty
+/// container cannot grow the buffer without limit.
+const MAX_LOG_LINES: i32 = 2000;
 
 /// A read-only view of one container.
 pub struct DetailView {
@@ -25,7 +29,9 @@ pub struct DetailView {
     networks: Label,
     mounts: Label,
     logs: TextView,
+    logs_scroll: ScrolledWindow,
     logs_refresh: Button,
+    follow: ToggleButton,
 }
 
 impl DetailView {
@@ -102,7 +108,11 @@ impl DetailView {
             .margin_top(6)
             .margin_bottom(6)
             .build();
+        let follow = ToggleButton::builder().label("Follow").build();
+        follow.set_tooltip_text(Some("Stream new log output as it arrives"));
+
         logs_header.append(&logs_title);
+        logs_header.append(&follow);
         logs_header.append(&logs_refresh);
 
         let root = GtkBox::new(Orientation::Vertical, 0);
@@ -129,7 +139,9 @@ impl DetailView {
             networks,
             mounts,
             logs,
+            logs_scroll,
             logs_refresh,
+            follow,
         }
     }
 
@@ -143,6 +155,47 @@ impl DetailView {
 
     pub fn connect_logs_refresh(&self, handler: impl Fn() + 'static) {
         self.logs_refresh.connect_clicked(move |_| handler());
+    }
+
+    /// Called with the new state whenever Follow is toggled.
+    pub fn connect_follow(&self, handler: impl Fn(bool) + 'static) {
+        self.follow
+            .connect_toggled(move |button| handler(button.is_active()));
+    }
+
+    /// Turn Follow off without firing the handler's side effects twice.
+    pub fn set_following(&self, following: bool) {
+        if self.follow.is_active() != following {
+            self.follow.set_active(following);
+        }
+    }
+
+    /// Append streamed output, trimming the buffer and scrolling to the end.
+    pub fn append_logs(&self, text: &str) {
+        let buffer = self.logs.buffer();
+        buffer.insert(&mut buffer.end_iter(), text);
+        self.trim_logs();
+        self.scroll_to_end();
+    }
+
+    /// Keep only the most recent lines, so a chatty container cannot grow the
+    /// buffer without bound while it is being followed.
+    fn trim_logs(&self) {
+        let buffer = self.logs.buffer();
+        let excess = buffer.line_count() - MAX_LOG_LINES;
+        if excess <= 0 {
+            return;
+        }
+        let start = buffer.start_iter();
+        let Some(cut) = buffer.iter_at_line(excess) else {
+            return;
+        };
+        buffer.delete(&mut start.clone(), &mut cut.clone());
+    }
+
+    fn scroll_to_end(&self) {
+        let adjustment = self.logs_scroll.vadjustment();
+        adjustment.set_value(adjustment.upper() - adjustment.page_size());
     }
 
     pub fn set_visible(&self, visible: bool) {

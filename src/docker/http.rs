@@ -9,9 +9,9 @@
 //!
 //! One request per connection, using `Connection: close`.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
-use super::transport::Stream;
+use super::transport::Connection;
 use super::DockerError;
 
 /// A complete (non-streaming) HTTP response.
@@ -22,7 +22,7 @@ pub struct Response {
 
 /// Perform one request on a freshly connected stream.
 pub fn request(
-    stream: Box<dyn Stream>,
+    stream: Connection,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
@@ -39,7 +39,7 @@ pub fn request(
 }
 
 fn write_request(
-    stream: &mut Box<dyn Stream>,
+    stream: &mut Connection,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
@@ -134,24 +134,81 @@ fn read_body<R: BufRead>(
     }
 }
 
-/// Decode a chunked body: size line, that many bytes, CRLF, until a zero chunk.
+/// Decode a whole chunked body, to the terminating zero chunk.
 fn read_chunked<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, DockerError> {
     let mut body = Vec::new();
-    loop {
-        let size = read_chunk_size(reader)?;
-        if size == 0 {
-            // Trailing headers, then the final blank line.
-            while !read_line(reader)?.is_empty() {}
-            return Ok(body);
+    while let Some(chunk) = read_chunk(reader)? {
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Read one chunk, or `None` at the terminating zero chunk.
+///
+/// Reading chunk by chunk is what makes following possible: a whole-body read
+/// would block until the container exited.
+fn read_chunk<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, DockerError> {
+    let size = read_chunk_size(reader)?;
+    if size == 0 {
+        // Trailing headers, then the final blank line.
+        while !read_line(reader)?.is_empty() {}
+        return Ok(None);
+    }
+
+    let mut chunk = vec![0; size];
+    reader.read_exact(&mut chunk).map_err(io_error)?;
+
+    // Each chunk's data is followed by CRLF.
+    read_line(reader)?;
+    Ok(Some(chunk))
+}
+
+/// A response whose body is read incrementally.
+pub struct Streaming {
+    reader: BufReader<Connection>,
+    chunked: bool,
+}
+
+impl Streaming {
+    /// The next piece of body, or `None` when the stream ends.
+    pub fn next(&mut self) -> Result<Option<Vec<u8>>, DockerError> {
+        if self.chunked {
+            return read_chunk(&mut self.reader);
         }
 
-        let start = body.len();
-        body.resize(start + size, 0);
-        reader.read_exact(&mut body[start..]).map_err(io_error)?;
-
-        // Each chunk's data is followed by CRLF.
-        read_line(reader)?;
+        // Not chunked: read whatever has arrived.
+        let mut buf = vec![0; 8192];
+        match self.reader.read(&mut buf) {
+            Ok(0) => Ok(None),
+            Ok(n) => {
+                buf.truncate(n);
+                Ok(Some(buf))
+            }
+            Err(e) => Err(io_error(e)),
+        }
     }
+}
+
+/// Begin a request whose body is read incrementally.
+///
+/// The status line and headers are consumed here, so a failure is reported
+/// before any streaming starts.
+pub fn open_stream(
+    stream: Connection,
+    method: &str,
+    path: &str,
+) -> Result<(u16, Streaming), DockerError> {
+    let mut stream = stream;
+    write_request(&mut stream, method, path, None).map_err(io_error)?;
+
+    let mut reader = BufReader::new(stream);
+    let status = read_status_line(&mut reader)?;
+    let headers = read_headers(&mut reader)?;
+
+    let chunked = header(&headers, "transfer-encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+
+    Ok((status, Streaming { reader, chunked }))
 }
 
 /// A chunk size is hex, optionally followed by `;extension`.
@@ -268,6 +325,32 @@ mod tests {
 
         let mut r = BufReader::new(Cursor::new(raw));
         assert_eq!(read_chunked(&mut r).unwrap(), vec![1, 0, 0, 0, 0, 0, 0, 5]);
+    }
+
+    #[test]
+    fn reads_chunks_one_at_a_time() {
+        let mut r = reader("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+        assert_eq!(read_chunk(&mut r).unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(read_chunk(&mut r).unwrap(), Some(b" world".to_vec()));
+        assert_eq!(
+            read_chunk(&mut r).unwrap(),
+            None,
+            "zero chunk ends the stream"
+        );
+    }
+
+    #[test]
+    fn reads_a_docker_log_chunk_whole() {
+        // Docker sends one framed log record per HTTP chunk; the chunk must
+        // come back intact for the log decoder to parse.
+        let mut raw = b"10\r\n".to_vec();
+        raw.extend_from_slice(&[0x02, 0, 0, 0, 0, 0, 0, 0x08]);
+        raw.extend_from_slice(b"err 396\n\r\n0\r\n\r\n");
+
+        let mut r = BufReader::new(Cursor::new(raw));
+        let chunk = read_chunk(&mut r).unwrap().expect("one chunk");
+        assert_eq!(chunk.len(), 16);
+        assert_eq!(&chunk[8..], b"err 396\n");
     }
 
     #[test]

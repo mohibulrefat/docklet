@@ -15,7 +15,7 @@ use gtk::{
 
 use super::detail::DetailView;
 use super::object::ContainerObject;
-use crate::docker::{Container, Docker, DockerError};
+use crate::docker::{Container, Docker, DockerError, LogEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -62,6 +62,9 @@ pub struct ContainersPage {
     /// The container the detail pane is showing, and whether it has a TTY.
     /// Remembered so logs can be re-fetched without another inspect.
     open_container: RefCell<Option<(String, bool)>>,
+    /// The live log stream, if Follow is on. Dropping it stops the worker,
+    /// so replacing or clearing this is what tears the stream down.
+    follow: RefCell<Option<StreamHandle>>,
 }
 
 impl ContainersPage {
@@ -148,6 +151,7 @@ impl ContainersPage {
             refresh_again: Rc::new(Cell::new(false)),
             busy: Rc::new(Cell::new(false)),
             open_container: RefCell::new(None),
+            follow: RefCell::new(None),
         });
 
         actions.append(&page.action_button("Start", Docker::start_container));
@@ -191,6 +195,19 @@ impl ContainersPage {
             move || {
                 if let Some(page) = page.upgrade() {
                     page.reload_logs();
+                }
+            }
+        });
+
+        page.detail.connect_follow({
+            let page = Rc::downgrade(&page);
+            move |following| {
+                if let Some(page) = page.upgrade() {
+                    if following {
+                        page.start_follow();
+                    } else {
+                        page.stop_follow();
+                    }
                 }
             }
         });
@@ -274,15 +291,70 @@ impl ContainersPage {
     }
 
     /// Re-fetch the open container's logs.
+    ///
+    /// A manual refresh is a one-shot read, so it turns Follow off rather than
+    /// leaving a stream appending underneath it.
     fn reload_logs(self: &Rc<Self>) {
+        self.stop_follow();
+        self.detail.set_following(false);
         let open = self.open_container.borrow().clone();
         if let Some((id, tty)) = open {
             self.load_logs(&id, tty);
         }
     }
 
+    /// Begin streaming the open container's logs.
+    fn start_follow(self: &Rc<Self>) {
+        let open = self.open_container.borrow().clone();
+        let Some((id, tty)) = open else {
+            return;
+        };
+
+        let (sender, receiver) = async_channel::bounded::<LogEvent>(64);
+
+        let handle = match Docker::connect() {
+            Ok(docker) => docker.follow_logs(&id, tty, LOG_TAIL, sender),
+            Err(e) => {
+                self.show_error(&format!("Could not follow logs. {e}"));
+                self.detail.set_following(false);
+                return;
+            }
+        };
+        // Replacing any previous handle drops it, stopping that stream.
+        self.follow.replace(Some(handle));
+
+        // Following restarts from the tail, so clear what the one-shot fetch left.
+        self.detail.set_logs("");
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(event) = receiver.recv().await {
+                let Some(page) = page.upgrade() else {
+                    return;
+                };
+                match event {
+                    LogEvent::Text(text) => page.detail.append_logs(&text),
+                    LogEvent::Failed(message) => {
+                        page.show_error(&format!("Log stream ended. {message}"));
+                        page.stop_follow();
+                        page.detail.set_following(false);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Stop streaming, if we are.
+    fn stop_follow(&self) {
+        // Dropping the handle shuts the socket down, which unblocks the worker.
+        self.follow.replace(None);
+    }
+
     /// Return to the list.
     fn close_detail(self: &Rc<Self>) {
+        self.stop_follow();
+        self.detail.set_following(false);
         self.open_container.replace(None);
         self.detail.set_visible(false);
         self.actions.set_visible(true);

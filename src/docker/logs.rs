@@ -12,6 +12,9 @@
 //! With a TTY there is no framing at all — the bytes are the output. Both cases
 //! occur in practice, so both are handled.
 
+use async_channel::Sender;
+
+use super::stream::{StreamEvent, StreamHandle};
 use super::{Docker, DockerError};
 
 /// Header length for one multiplexed frame.
@@ -67,7 +70,44 @@ impl LogDecoder {
     }
 }
 
+/// What a followed log stream delivers.
+pub enum LogEvent {
+    Text(String),
+    Failed(String),
+}
+
 impl Docker {
+    /// Follow a container's logs until the handle is dropped.
+    ///
+    /// Decoding lives in the worker: the decoder holds partial frames between
+    /// reads, so it must be the same one for the life of the stream.
+    pub fn follow_logs(
+        &self,
+        id: &str,
+        tty: bool,
+        tail: usize,
+        sender: Sender<LogEvent>,
+    ) -> StreamHandle {
+        let mut decoder = LogDecoder::new(tty);
+        let path = format!("/containers/{id}/logs?stdout=1&stderr=1&tail={tail}&follow=1");
+
+        self.stream(&path, move |event| match event {
+            StreamEvent::Data(data) => {
+                let text = decoder.feed(data);
+                if text.is_empty() {
+                    // A partial frame; wait for the rest.
+                    return true;
+                }
+                // A closed receiver means the view is gone: stop reading.
+                sender.send_blocking(LogEvent::Text(text)).is_ok()
+            }
+            StreamEvent::Failed(e) => {
+                let _ = sender.send_blocking(LogEvent::Failed(e.to_string()));
+                false
+            }
+        })
+    }
+
     /// Fetch the tail of a container's logs.
     ///
     /// `tty` comes from inspecting the container and decides how the response

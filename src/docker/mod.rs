@@ -9,6 +9,7 @@ mod containers;
 mod endpoint;
 mod http;
 mod logs;
+mod stream;
 mod transport;
 
 use std::fmt;
@@ -17,6 +18,8 @@ use serde::Deserialize;
 
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
+pub use logs::LogEvent;
+pub use stream::StreamHandle;
 
 /// Everything that can go wrong talking to Docker.
 ///
