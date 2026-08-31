@@ -13,6 +13,7 @@ use gtk::{
     SingleSelection, Widget, Window,
 };
 
+use super::detail::DetailView;
 use super::object::ContainerObject;
 use crate::docker::{Container, Docker, DockerError};
 
@@ -45,6 +46,7 @@ pub struct ContainersPage {
     selection: SingleSelection,
     /// The action bar; made insensitive while an action runs.
     actions: GtkBox,
+    detail: DetailView,
     banner: Revealer,
     banner_label: Label,
     /// Guards against a second refresh starting while one is in flight.
@@ -116,11 +118,14 @@ impl ContainersPage {
             move |_| banner.set_reveal_child(false)
         });
 
+        let detail = DetailView::new();
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(&banner);
         root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
+        root.append(detail.widget());
 
         let page = Rc::new(ContainersPage {
             root,
@@ -129,6 +134,7 @@ impl ContainersPage {
             store,
             selection,
             actions: actions.clone(),
+            detail,
             banner,
             banner_label,
             refreshing: Rc::new(Cell::new(false)),
@@ -162,9 +168,60 @@ impl ContainersPage {
             }
         });
 
+        // Activating a row (double-click or Enter) opens its detail pane.
+        view.connect_activate({
+            let page = Rc::downgrade(&page);
+            move |_, _| {
+                if let Some(page) = page.upgrade() {
+                    page.open_detail();
+                }
+            }
+        });
+
+        page.detail.connect_back({
+            let page = Rc::downgrade(&page);
+            move || {
+                if let Some(page) = page.upgrade() {
+                    page.close_detail();
+                }
+            }
+        });
+
         page.sync_actions();
         page.refresh();
         page
+    }
+
+    /// Show the detail pane for the selected container.
+    fn open_detail(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        self.detail.show(&row);
+
+        self.actions.set_visible(false);
+        self.scrolled.set_visible(false);
+        self.empty.set_visible(false);
+        self.detail.set_visible(true);
+    }
+
+    /// Return to the list.
+    fn close_detail(self: &Rc<Self>) {
+        self.detail.set_visible(false);
+        self.actions.set_visible(true);
+        self.sync_list_visibility();
+    }
+
+    /// Show either the list or the empty state, whichever fits the store.
+    fn sync_list_visibility(&self) {
+        let is_empty = self.store.n_items() == 0;
+        self.empty.set_visible(is_empty);
+        self.scrolled.set_visible(!is_empty);
+    }
+
+    /// Whether the detail pane is currently showing.
+    fn showing_detail(&self) -> bool {
+        self.detail.widget().is_visible()
     }
 
     /// Enable the action bar only when it can actually do something.
@@ -332,9 +389,9 @@ impl ContainersPage {
                     apply(&page.store, &containers);
                     // Only after a completed load, so an empty grid during the
                     // first fetch is never mistaken for "no containers".
-                    let is_empty = page.store.n_items() == 0;
-                    page.empty.set_visible(is_empty);
-                    page.scrolled.set_visible(!is_empty);
+                    if !page.showing_detail() {
+                        page.sync_list_visibility();
+                    }
                     page.sync_actions();
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list containers. {e}")),
