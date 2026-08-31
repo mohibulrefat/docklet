@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Docklet
+Comment=A lightweight native GUI for Docker Engine
+Exec=docklet
+Icon=dev.docklet.Docklet
+Terminal=false
+Categories=Development;System;
+StartupNotify=true

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- A simple, flat container-crate glyph. Deliberately plain: Docklet is a
+       utility, not a brand, and the icon follows the same "no decorative UI"
+       rule as the rest of the app. -->
+  <rect x="16" y="40" width="96" height="64" rx="6" fill="#2b6cb0"/>
+  <rect x="16" y="40" width="96" height="16" rx="6" fill="#3182ce"/>
+  <rect x="30" y="64" width="24" height="24" fill="#ffffff" opacity="0.85"/>
+  <rect x="60" y="64" width="24" height="24" fill="#ffffff" opacity="0.6"/>
+  <rect x="90" y="64" width="10" height="24" fill="#ffffff" opacity="0.4"/>
+  <circle cx="64" cy="20" r="10" fill="#38a169"/>
+</svg>
