@@ -1,6 +1,6 @@
 //! The containers page.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::gio;
@@ -59,6 +59,9 @@ pub struct ContainersPage {
     refresh_again: Rc<Cell<bool>>,
     /// True while a lifecycle action is in flight.
     busy: Rc<Cell<bool>>,
+    /// The container the detail pane is showing, and whether it has a TTY.
+    /// Remembered so logs can be re-fetched without another inspect.
+    open_container: RefCell<Option<(String, bool)>>,
 }
 
 impl ContainersPage {
@@ -144,6 +147,7 @@ impl ContainersPage {
             refreshing: Rc::new(Cell::new(false)),
             refresh_again: Rc::new(Cell::new(false)),
             busy: Rc::new(Cell::new(false)),
+            open_container: RefCell::new(None),
         });
 
         actions.append(&page.action_button("Start", Docker::start_container));
@@ -178,6 +182,15 @@ impl ContainersPage {
             move |_, _| {
                 if let Some(page) = page.upgrade() {
                     page.open_detail();
+                }
+            }
+        });
+
+        page.detail.connect_logs_refresh({
+            let page = Rc::downgrade(&page);
+            move || {
+                if let Some(page) = page.upgrade() {
+                    page.reload_logs();
                 }
             }
         });
@@ -227,8 +240,11 @@ impl ContainersPage {
             match inspected {
                 Ok(Ok(inspect)) => {
                     page.detail.set_inspect(&inspect);
+                    let tty = inspect.config.tty;
+                    page.open_container
+                        .replace(Some((id_for_logs.clone(), tty)));
                     // Framing depends on the TTY flag, so logs wait for inspect.
-                    page.load_logs(&id_for_logs, inspect.config.tty);
+                    page.load_logs(&id_for_logs, tty);
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not inspect container. {e}")),
                 Err(_) => page.show_error("Could not inspect container."),
@@ -257,8 +273,17 @@ impl ContainersPage {
         });
     }
 
+    /// Re-fetch the open container's logs.
+    fn reload_logs(self: &Rc<Self>) {
+        let open = self.open_container.borrow().clone();
+        if let Some((id, tty)) = open {
+            self.load_logs(&id, tty);
+        }
+    }
+
     /// Return to the list.
     fn close_detail(self: &Rc<Self>) {
+        self.open_container.replace(None);
         self.detail.set_visible(false);
         self.actions.set_visible(true);
         self.sync_list_visibility();

@@ -25,6 +25,7 @@ pub struct DetailView {
     networks: Label,
     mounts: Label,
     logs: TextView,
+    logs_refresh: Button,
 }
 
 impl DetailView {
@@ -82,14 +83,27 @@ impl DetailView {
             .child(&logs)
             .build();
 
-        let logs_header = Label::builder()
+        let logs_title = Label::builder()
             .label("Logs")
             .halign(Align::Start)
+            .hexpand(true)
+            .build();
+        logs_title.add_css_class("heading");
+
+        let logs_refresh = Button::from_icon_name("view-refresh-symbolic");
+        logs_refresh.set_tooltip_text(Some("Refresh logs"));
+        logs_refresh.add_css_class("flat");
+
+        let logs_header = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
             .margin_start(12)
+            .margin_end(6)
             .margin_top(6)
             .margin_bottom(6)
             .build();
-        logs_header.add_css_class("heading");
+        logs_header.append(&logs_title);
+        logs_header.append(&logs_refresh);
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(&header);
@@ -115,6 +129,7 @@ impl DetailView {
             networks,
             mounts,
             logs,
+            logs_refresh,
         }
     }
 
@@ -124,6 +139,10 @@ impl DetailView {
 
     pub fn connect_back(&self, handler: impl Fn() + 'static) {
         self.back.connect_clicked(move |_| handler());
+    }
+
+    pub fn connect_logs_refresh(&self, handler: impl Fn() + 'static) {
+        self.logs_refresh.connect_clicked(move |_| handler());
     }
 
     pub fn set_visible(&self, visible: bool) {
