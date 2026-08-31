@@ -10,6 +10,7 @@ mod detail;
 mod dialog;
 mod images;
 mod list;
+mod logpane;
 mod networks;
 mod object;
 mod volumes;
