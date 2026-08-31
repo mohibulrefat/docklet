@@ -97,6 +97,7 @@ impl ContainersPage {
 
         actions.append(&page.action_button("Start", Docker::start_container));
         actions.append(&page.action_button("Stop", Docker::stop_container));
+        actions.append(&page.action_button("Restart", Docker::restart_container));
 
         page.refresh();
         page

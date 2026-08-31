@@ -364,6 +364,16 @@ mod tests {
     }
 
     #[test]
+    fn restarts_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.restart_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/restart HTTP/1.1"
+        );
+    }
+
+    #[test]
     fn extracts_the_docker_error_message() {
         let body = br#"{"message":"No such container: abc"}"#;
         assert_eq!(api_message(body), "No such container: abc");

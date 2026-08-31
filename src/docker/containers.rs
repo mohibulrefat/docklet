@@ -88,6 +88,11 @@ impl Docker {
     pub fn stop_container(&self, id: &str) -> Result<(), DockerError> {
         self.post(&format!("/containers/{id}/stop"))
     }
+
+    /// Restart a container, running or not.
+    pub fn restart_container(&self, id: &str) -> Result<(), DockerError> {
+        self.post(&format!("/containers/{id}/restart"))
+    }
 }
 
 #[cfg(test)]
