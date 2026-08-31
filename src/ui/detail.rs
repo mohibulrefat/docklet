@@ -34,6 +34,7 @@ pub struct DetailView {
     follow: ToggleButton,
     cpu: Label,
     memory: Label,
+    network: Label,
 }
 
 impl DetailView {
@@ -71,11 +72,12 @@ impl DetailView {
         let status = field(&grid, 4, "Status", false);
         let cpu = field(&grid, 5, "CPU", false);
         let memory = field(&grid, 6, "Memory", false);
-        let created = field(&grid, 7, "Created", false);
-        let command = field(&grid, 8, "Command", true);
-        let restart = field(&grid, 9, "Restart", false);
-        let networks = field(&grid, 10, "Networks", false);
-        let mounts = field(&grid, 11, "Mounts", false);
+        let network = field(&grid, 7, "Network", false);
+        let created = field(&grid, 8, "Created", false);
+        let command = field(&grid, 9, "Command", true);
+        let restart = field(&grid, 10, "Restart", false);
+        let networks = field(&grid, 11, "Networks", false);
+        let mounts = field(&grid, 12, "Mounts", false);
 
         let logs = TextView::builder()
             .editable(false)
@@ -148,6 +150,7 @@ impl DetailView {
             follow,
             cpu,
             memory,
+            network,
         }
     }
 
@@ -228,6 +231,7 @@ impl DetailView {
             &self.mounts,
             &self.cpu,
             &self.memory,
+            &self.network,
         ] {
             label.set_text("");
         }
@@ -254,11 +258,25 @@ impl DetailView {
         });
     }
 
+    /// Show the current network transfer rate, or a placeholder before the
+    /// second sample makes a rate computable.
+    pub fn set_network_rate(&self, rate: Option<(f64, f64)>) {
+        self.network.set_text(&match rate {
+            Some((rx, tx)) => format!(
+                "\u{2193} {}/s   \u{2191} {}/s",
+                crate::docker::human_size(rx as u64),
+                crate::docker::human_size(tx as u64)
+            ),
+            None => "—".to_string(),
+        });
+    }
+
     /// Stats stopped or never started for this container; show nothing rather
     /// than a stale reading from whatever was open before.
     pub fn clear_stats(&self) {
         self.cpu.set_text("");
         self.memory.set_text("");
+        self.network.set_text("");
     }
 
     /// Replace the log view's contents.

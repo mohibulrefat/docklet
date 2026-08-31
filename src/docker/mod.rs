@@ -25,7 +25,7 @@ pub use endpoint::Endpoint;
 pub use images::{human_size, now_seconds, Image, ImageInspect, PullEvent};
 pub use logs::LogEvent;
 pub use networks::Network;
-pub use stats::{StatsEvent, StatsSample};
+pub use stats::StatsEvent;
 pub use stream::StreamHandle;
 pub use volumes::Volume;
 

@@ -68,7 +68,50 @@ pub struct NetworkStats {
     pub tx_bytes: u64,
 }
 
+impl MemoryStats {
+    /// Memory actually in use, the way `docker stats` reports it.
+    ///
+    /// The raw `usage` figure includes the kernel's page cache, which is
+    /// reclaimable and not what a user means by "how much memory is this
+    /// container using". Subtracting it is what `docker stats` itself does.
+    /// cgroup v2 calls it `inactive_file`; v1 called it `cache` — both are
+    /// tried, in that order, so the numbers agree on either cgroup version.
+    pub fn working_set(&self) -> u64 {
+        let cache = self
+            .stats
+            .get("inactive_file")
+            .or_else(|| self.stats.get("cache"))
+            .copied()
+            .unwrap_or(0);
+        self.usage.saturating_sub(cache)
+    }
+}
+
 impl StatsSample {
+    /// The read timestamp, parsed for computing a rate between two samples.
+    ///
+    /// RFC 3339 with nanosecond precision sorts and parses lexically for our
+    /// purposes: only the seconds-and-fraction difference is used, so a full
+    /// calendar parser would be a dependency for something this narrow.
+    pub fn read_seconds(&self) -> Option<f64> {
+        // "…T15:37:24.782923897Z" — split at 'T', then at the final 'Z'.
+        let time = self.read.split('T').nth(1)?.trim_end_matches('Z');
+        let (h, rest) = time.split_once(':')?;
+        let (m, s) = rest.split_once(':')?;
+        Some(
+            h.parse::<f64>().ok()? * 3600.0
+                + m.parse::<f64>().ok()? * 60.0
+                + s.parse::<f64>().ok()?,
+        )
+    }
+
+    /// Total received and transmitted bytes, summed across every interface.
+    pub fn network_totals(&self) -> (u64, u64) {
+        self.networks
+            .values()
+            .fold((0, 0), |(rx, tx), n| (rx + n.rx_bytes, tx + n.tx_bytes))
+    }
+
     /// CPU usage as a percentage of one core's capacity, scaled by the number
     /// of online CPUs — the same formula `docker stats` uses.
     ///
@@ -88,25 +131,6 @@ impl StatsSample {
         }
 
         Some((cpu_delta / system_delta) * self.cpu_stats.online_cpus as f64 * 100.0)
-    }
-}
-
-impl MemoryStats {
-    /// Memory actually in use, the way `docker stats` reports it.
-    ///
-    /// The raw `usage` figure includes the kernel's page cache, which is
-    /// reclaimable and not what a user means by "how much memory is this
-    /// container using". Subtracting it is what `docker stats` itself does.
-    /// cgroup v2 calls it `inactive_file`; v1 called it `cache` — both are
-    /// tried, in that order, so the numbers agree on either cgroup version.
-    pub fn working_set(&self) -> u64 {
-        let cache = self
-            .stats
-            .get("inactive_file")
-            .or_else(|| self.stats.get("cache"))
-            .copied()
-            .unwrap_or(0);
-        self.usage.saturating_sub(cache)
     }
 }
 
@@ -241,6 +265,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sample.cpu_percent(), None);
+    }
+
+    #[test]
+    fn sums_network_bytes_across_interfaces() {
+        let sample: StatsSample = serde_json::from_str(
+            r#"{"networks": {"eth0": {"rx_bytes": 100, "tx_bytes": 10},
+                             "eth1": {"rx_bytes": 50, "tx_bytes": 5}}}"#,
+        )
+        .unwrap();
+        assert_eq!(sample.network_totals(), (150, 15));
+    }
+
+    #[test]
+    fn parses_the_read_timestamp_into_seconds() {
+        let sample: StatsSample = serde_json::from_str(SAMPLE).unwrap();
+        // 15:37:24.782923897 -> 15*3600 + 37*60 + 24.782923897
+        let seconds = sample.read_seconds().expect("should parse");
+        assert!((seconds - 56244.782923897).abs() < 0.001, "got {seconds}");
     }
 
     #[test]

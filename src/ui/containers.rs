@@ -251,6 +251,11 @@ impl ContainersPage {
 
         let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
+            // The previous sample's network totals and timestamp, for turning
+            // cumulative counters into a rate. `None` until a second sample
+            // arrives, which is also why the first reading shows "—".
+            let mut previous: Option<(f64, u64, u64)> = None;
+
             while let Ok(event) = receiver.recv().await {
                 let Some(page) = page.upgrade() else {
                     return;
@@ -262,6 +267,23 @@ impl ContainersPage {
                             sample.memory_stats.working_set(),
                             sample.memory_stats.limit,
                         );
+
+                        let (rx, tx) = sample.network_totals();
+                        let rate = match (previous, sample.read_seconds()) {
+                            (Some((prev_t, prev_rx, prev_tx)), Some(now_t)) if now_t > prev_t => {
+                                let elapsed = now_t - prev_t;
+                                Some((
+                                    (rx.saturating_sub(prev_rx)) as f64 / elapsed,
+                                    (tx.saturating_sub(prev_tx)) as f64 / elapsed,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        page.detail.set_network_rate(rate);
+
+                        if let Some(now_t) = sample.read_seconds() {
+                            previous = Some((now_t, rx, tx));
+                        }
                     }
                     StatsEvent::Failed(_) => {
                         // The container likely stopped; that ends the stream
