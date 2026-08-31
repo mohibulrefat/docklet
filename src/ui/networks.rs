@@ -7,8 +7,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Box as GtkBox, ColumnView, Label, Orientation, PolicyType, ScrolledWindow, SingleSelection,
-    Widget,
+    Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ScrolledWindow,
+    SingleSelection, Widget,
 };
 
 use super::banner::Banner;
@@ -54,6 +54,8 @@ pub struct NetworksPage {
     selection: SingleSelection,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
+    name_entry: Entry,
+    driver_entry: Entry,
 }
 
 impl NetworksPage {
@@ -84,8 +86,32 @@ impl NetworksPage {
 
         let banner = Banner::new();
 
+        let name_entry = Entry::builder()
+            .placeholder_text("network name")
+            .hexpand(true)
+            .build();
+        let driver_entry = Entry::builder()
+            .placeholder_text("driver (bridge)")
+            .width_chars(14)
+            .build();
+        let create_button = Button::with_label("Create");
+        create_button.add_css_class("suggested-action");
+
+        let actions = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        actions.append(&name_entry);
+        actions.append(&driver_entry);
+        actions.append(&create_button);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
 
@@ -97,6 +123,25 @@ impl NetworksPage {
             selection,
             banner,
             refreshing: Rc::new(Cell::new(false)),
+            name_entry,
+            driver_entry,
+        });
+
+        create_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.create_network();
+                }
+            }
+        });
+        page.name_entry.connect_activate({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.create_network();
+                }
+            }
         });
 
         page.refresh();
@@ -116,6 +161,38 @@ impl NetworksPage {
     fn show_error(&self, message: &str) {
         glib::g_warning!(LOG_DOMAIN, "{message}");
         self.banner.show(message);
+    }
+
+    /// Create a network from the entries.
+    fn create_network(self: &Rc<Self>) {
+        let name = self.name_entry.text().trim().to_string();
+        if name.is_empty() {
+            self.show_error("Enter a name for the network.");
+            return;
+        }
+        let driver = self.driver_entry.text().trim().to_string();
+
+        self.banner.clear();
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let created = {
+                let (name, driver) = (name.clone(), driver.clone());
+                gio::spawn_blocking(move || Docker::connect()?.create_network(&name, &driver)).await
+            };
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match created {
+                Ok(Ok(())) => {
+                    page.name_entry.set_text("");
+                    page.driver_entry.set_text("");
+                    page.refresh();
+                }
+                Ok(Err(e)) => page.show_error(&format!("Could not create {name}. {e}")),
+                Err(_) => page.show_error(&format!("Could not create {name}.")),
+            }
+        });
     }
 
     fn sync_list_visibility(&self) {
