@@ -256,6 +256,13 @@ impl ContainersPage {
             // arrives, which is also why the first reading shows "—".
             let mut previous: Option<(f64, u64, u64)> = None;
 
+            // Docker does not close this stream when a container merely
+            // stops — verified directly against the daemon, and it matches
+            // `docker stats` itself: the numbers just settle at zero, which
+            // the per-sample update below already renders correctly with no
+            // special case needed. The stream *does* end — via a clean EOF,
+            // not an error — when the container is removed, which is what
+            // the loop exiting without a `Failed` event below is for.
             while let Ok(event) = receiver.recv().await {
                 let Some(page) = page.upgrade() else {
                     return;
@@ -285,13 +292,20 @@ impl ContainersPage {
                             previous = Some((now_t, rx, tx));
                         }
                     }
-                    StatsEvent::Failed(_) => {
-                        // The container likely stopped; that ends the stream
-                        // naturally rather than being an error worth a banner.
+                    StatsEvent::Failed(message) => {
+                        glib::g_warning!(LOG_DOMAIN, "stats stream failed: {message}");
                         page.detail.clear_stats();
                         return;
                     }
                 }
+            }
+
+            // The channel closed with no `Failed` event: a clean EOF, which
+            // is what a removed container looks like. Blanking the fields
+            // here is what stops them from showing a frozen last reading for
+            // a container that no longer exists.
+            if let Some(page) = page.upgrade() {
+                page.detail.clear_stats();
             }
         });
     }

@@ -173,6 +173,14 @@ impl Docker {
     }
 }
 
+// Verified live against the daemon (2026-08-31): stopping a container does
+// NOT close its stats stream — Docker keeps emitting samples with CPU
+// trending to zero and memory/network settling at their final values, the
+// same as `docker stats` itself displays. The stream only ends, via a clean
+// EOF, when the container is *removed*. `ui::containers::start_stats` relies
+// on both of these: normal per-sample updates handle "stopped", and the
+// receive loop ending without a `Failed` event handles "removed".
+
 #[cfg(test)]
 mod tests {
     use super::*;
