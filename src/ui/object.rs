@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use gtk::glib;
 use gtk::subclass::prelude::*;
 
-use crate::docker::Container;
+use super::list::Row;
+use crate::docker::{Container, Image};
 
 mod imp {
     use super::*;
@@ -90,5 +91,99 @@ impl ContainerObject {
 
     pub fn status(&self) -> String {
         self.imp().status.borrow().clone()
+    }
+}
+
+impl Row for ContainerObject {
+    type Data = Container;
+
+    fn build(container: &Container) -> Self {
+        ContainerObject::new(container)
+    }
+
+    fn key(&self) -> String {
+        self.id()
+    }
+
+    fn key_of(container: &Container) -> &str {
+        &container.id
+    }
+
+    fn matches(&self, container: &Container) -> bool {
+        ContainerObject::matches(self, container)
+    }
+
+    fn update(&self, container: &Container) {
+        self.set(container);
+    }
+}
+
+mod image_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct ImageObject {
+        pub id: RefCell<String>,
+        pub repository: RefCell<String>,
+        pub tag: RefCell<String>,
+        pub short_id: RefCell<String>,
+        pub size: RefCell<String>,
+        pub created: RefCell<String>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for ImageObject {
+        const NAME: &'static str = "DockletImageObject";
+        type Type = super::ImageObject;
+    }
+
+    impl ObjectImpl for ImageObject {}
+}
+
+glib::wrapper! {
+    pub struct ImageObject(ObjectSubclass<image_imp::ImageObject>);
+}
+
+impl ImageObject {
+    /// Ages are relative, so the row is built against a fixed "now" — one per
+    /// refresh, so every row in a list agrees on the time.
+    pub fn new(image: &Image, now: i64) -> Self {
+        let object: Self = glib::Object::new();
+        object.set(image, now);
+        object
+    }
+
+    pub fn set(&self, image: &Image, now: i64) {
+        let imp = self.imp();
+        imp.id.replace(image.id.clone());
+        imp.repository.replace(image.repository().to_string());
+        imp.tag.replace(image.tag().to_string());
+        imp.short_id.replace(image.short_id().to_string());
+        imp.size.replace(image.size_display());
+        imp.created.replace(image.created_display(now));
+    }
+
+    pub fn id(&self) -> String {
+        self.imp().id.borrow().clone()
+    }
+
+    pub fn repository(&self) -> String {
+        self.imp().repository.borrow().clone()
+    }
+
+    pub fn tag(&self) -> String {
+        self.imp().tag.borrow().clone()
+    }
+
+    pub fn short_id(&self) -> String {
+        self.imp().short_id.borrow().clone()
+    }
+
+    pub fn size(&self) -> String {
+        self.imp().size.borrow().clone()
+    }
+
+    pub fn created(&self) -> String {
+        self.imp().created.borrow().clone()
     }
 }

@@ -3,8 +3,11 @@
 //! Nothing here knows how Docker is reached — no socket paths, no contexts, no
 //! HTTP. It calls typed functions on `docker` and renders what comes back.
 
+mod banner;
 mod containers;
 mod detail;
+mod images;
+mod list;
 mod object;
 mod window;
 

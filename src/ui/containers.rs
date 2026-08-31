@@ -5,17 +5,18 @@ use std::rc::Rc;
 
 use gtk::gio;
 use gtk::glib;
-use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{
     AlertDialog, Align, Box as GtkBox, Button, ColumnView, ColumnViewColumn, CssProvider, Label,
-    ListItem, Orientation, PolicyType, Revealer, ScrolledWindow, SignalListItemFactory,
-    SingleSelection, Widget, Window,
+    ListItem, Orientation, PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection,
+    Widget, Window,
 };
 
+use super::banner::Banner;
 use super::detail::DetailView;
+use super::list::{self, mono_column, text_column};
 use super::object::ContainerObject;
-use crate::docker::{Container, Docker, DockerError, LogEvent, StreamHandle};
+use crate::docker::{Docker, DockerError, LogEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -51,8 +52,7 @@ pub struct ContainersPage {
     /// The action bar; made insensitive while an action runs.
     actions: GtkBox,
     detail: DetailView,
-    banner: Revealer,
-    banner_label: Label,
+    banner: Banner,
     /// Guards against a second refresh starting while one is in flight.
     refreshing: Rc<Cell<bool>>,
     /// A refresh asked for while one was already running.
@@ -76,10 +76,22 @@ impl ContainersPage {
 
         let view = ColumnView::builder().model(&selection).build();
         view.append_column(&state_column());
-        view.append_column(&text_column("Name", ContainerObject::name));
-        view.append_column(&text_column("Image", ContainerObject::image));
-        view.append_column(&mono_column("ID", ContainerObject::short_id));
-        view.append_column(&text_column("Status", ContainerObject::status));
+        view.append_column(&text_column::<ContainerObject>(
+            "Name",
+            ContainerObject::name,
+        ));
+        view.append_column(&text_column::<ContainerObject>(
+            "Image",
+            ContainerObject::image,
+        ));
+        view.append_column(&mono_column::<ContainerObject>(
+            "ID",
+            ContainerObject::short_id,
+        ));
+        view.append_column(&text_column::<ContainerObject>(
+            "Status",
+            ContainerObject::status,
+        ));
 
         let scrolled = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Automatic)
@@ -103,35 +115,12 @@ impl ContainersPage {
             .margin_end(6)
             .build();
 
-        let banner_label = Label::builder()
-            .halign(Align::Start)
-            .hexpand(true)
-            .wrap(true)
-            .xalign(0.0)
-            .build();
-
-        let dismiss = Button::from_icon_name("window-close-symbolic");
-        dismiss.add_css_class("flat");
-        dismiss.set_tooltip_text(Some("Dismiss"));
-
-        let banner_box = GtkBox::new(Orientation::Horizontal, 6);
-        banner_box.add_css_class("docklet-banner");
-        banner_box.append(&banner_label);
-        banner_box.append(&dismiss);
-
-        let banner = Revealer::builder()
-            .child(&banner_box)
-            .reveal_child(false)
-            .build();
-        dismiss.connect_clicked({
-            let banner = banner.clone();
-            move |_| banner.set_reveal_child(false)
-        });
+        let banner = Banner::new();
 
         let detail = DetailView::new();
 
         let root = GtkBox::new(Orientation::Vertical, 0);
-        root.append(&banner);
+        root.append(banner.widget());
         root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
@@ -146,7 +135,6 @@ impl ContainersPage {
             actions: actions.clone(),
             detail,
             banner,
-            banner_label,
             refreshing: Rc::new(Cell::new(false)),
             refresh_again: Rc::new(Cell::new(false)),
             busy: Rc::new(Cell::new(false)),
@@ -382,12 +370,11 @@ impl ContainersPage {
     /// Show a failure to the user, and log it.
     fn show_error(&self, message: &str) {
         glib::g_warning!(LOG_DOMAIN, "{message}");
-        self.banner_label.set_text(message);
-        self.banner.set_reveal_child(true);
+        self.banner.show(message);
     }
 
     fn clear_error(&self) {
-        self.banner.set_reveal_child(false);
+        self.banner.clear();
     }
 
     /// The container the user has selected, if any.
@@ -535,7 +522,7 @@ impl ContainersPage {
 
             match listed {
                 Ok(Ok(containers)) => {
-                    apply(&page.store, &containers);
+                    list::apply::<ContainerObject>(&page.store, &containers);
                     // Only after a completed load, so an empty grid during the
                     // first fetch is never mistaken for "no containers".
                     if !page.showing_detail() {
@@ -579,104 +566,6 @@ async fn remove(id: &str, force: bool) -> Result<(), DockerError> {
     gio::spawn_blocking(move || Docker::connect()?.remove_container(&id, force))
         .await
         .unwrap_or_else(|_| Err(DockerError::Protocol("the remove task panicked".into())))
-}
-
-/// Bring the store into line with a freshly fetched list.
-///
-/// Rows are matched by container id and updated in place rather than the store
-/// being cleared and refilled: that keeps the selection, avoids flicker, and
-/// leaves rows whose values did not change completely untouched.
-fn apply(store: &gio::ListStore, containers: &[Container]) {
-    for (index, container) in containers.iter().enumerate() {
-        let index = index as u32;
-
-        match find(store, &container.id, index) {
-            Some(found) if found == index => {
-                let row = row_at(store, index);
-                if !row.matches(container) {
-                    row.set(container);
-                    // No properties to notify, so ask the view to rebind.
-                    store.items_changed(index, 1, 1);
-                }
-            }
-            Some(found) => {
-                // Same container, different position: move it rather than
-                // rebuilding, so its row keeps its identity.
-                let row = row_at(store, found);
-                store.remove(found);
-                row.set(container);
-                store.insert(index, &row);
-            }
-            None => store.insert(index, &ContainerObject::new(container)),
-        }
-    }
-
-    // Anything past the new length is gone from Docker.
-    while store.n_items() > containers.len() as u32 {
-        store.remove(store.n_items() - 1);
-    }
-}
-
-/// Position of the row for `id`, searching from `from` onwards.
-fn find(store: &gio::ListStore, id: &str, from: u32) -> Option<u32> {
-    (from..store.n_items()).find(|&i| row_at(store, i).id() == id)
-}
-
-fn row_at(store: &gio::ListStore, index: u32) -> ContainerObject {
-    store
-        .item(index)
-        .and_downcast::<ContainerObject>()
-        .expect("the store only ever holds ContainerObjects")
-}
-
-/// A column of text that shares the remaining width and truncates when narrow.
-fn text_column(title: &str, field: fn(&ContainerObject) -> String) -> ColumnViewColumn {
-    column(title, field, false, true)
-}
-
-/// A fixed-width column of monospace text, for ids.
-fn mono_column(title: &str, field: fn(&ContainerObject) -> String) -> ColumnViewColumn {
-    column(title, field, true, false)
-}
-
-fn column(
-    title: &str,
-    field: fn(&ContainerObject) -> String,
-    monospace: bool,
-    expand: bool,
-) -> ColumnViewColumn {
-    let factory = SignalListItemFactory::new();
-
-    factory.connect_setup(move |_, item| {
-        let label = Label::builder()
-            .halign(Align::Start)
-            .ellipsize(EllipsizeMode::End)
-            .build();
-        if monospace {
-            label.add_css_class("monospace");
-        }
-        item.downcast_ref::<ListItem>()
-            .expect("list item")
-            .set_child(Some(&label));
-    });
-
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<ListItem>().expect("list item");
-        let Some(object) = item.item().and_downcast::<ContainerObject>() else {
-            return;
-        };
-        let Some(label) = item.child().and_downcast::<Label>() else {
-            return;
-        };
-        label.set_text(&field(&object));
-    });
-
-    ColumnViewColumn::builder()
-        .title(title)
-        .factory(&factory)
-        .expand(expand)
-        .resizable(true)
-        .build()
 }
 
 /// The bullet and CSS class for a container state.
@@ -747,6 +636,7 @@ fn install_style() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docker::Container;
 
     /// Build a container with just the fields the store compares.
     fn container(id: &str, name: &str, state: &str) -> Container {
@@ -759,13 +649,13 @@ mod tests {
 
     fn store_of(containers: &[Container]) -> gio::ListStore {
         let store = gio::ListStore::new::<ContainerObject>();
-        apply(&store, containers);
+        list::apply::<ContainerObject>(&store, containers);
         store
     }
 
     fn ids(store: &gio::ListStore) -> Vec<String> {
         (0..store.n_items())
-            .map(|i| row_at(store, i).id())
+            .map(|i| list::row_at::<ContainerObject>(store, i).id())
             .collect()
     }
 
@@ -773,13 +663,13 @@ mod tests {
     fn fills_an_empty_store() {
         let store = store_of(&[container("a", "one", "running")]);
         assert_eq!(ids(&store), ["a"]);
-        assert_eq!(row_at(&store, 0).name(), "one");
+        assert_eq!(list::row_at::<ContainerObject>(&store, 0).name(), "one");
     }
 
     #[test]
     fn appends_a_new_container() {
         let store = store_of(&[container("a", "one", "running")]);
-        apply(
+        list::apply::<ContainerObject>(
             &store,
             &[
                 container("a", "one", "running"),
@@ -795,25 +685,25 @@ mod tests {
             container("a", "one", "running"),
             container("b", "two", "exited"),
         ]);
-        apply(&store, &[container("b", "two", "exited")]);
+        list::apply::<ContainerObject>(&store, &[container("b", "two", "exited")]);
         assert_eq!(ids(&store), ["b"]);
     }
 
     #[test]
     fn removes_every_container() {
         let store = store_of(&[container("a", "one", "running")]);
-        apply(&store, &[]);
+        list::apply::<ContainerObject>(&store, &[]);
         assert_eq!(store.n_items(), 0);
     }
 
     #[test]
     fn updates_a_changed_container_in_place() {
         let store = store_of(&[container("a", "one", "running")]);
-        let before = row_at(&store, 0);
+        let before = list::row_at::<ContainerObject>(&store, 0);
 
-        apply(&store, &[container("a", "one", "exited")]);
+        list::apply::<ContainerObject>(&store, &[container("a", "one", "exited")]);
 
-        let after = row_at(&store, 0);
+        let after = list::row_at::<ContainerObject>(&store, 0);
         assert_eq!(after.state(), "exited");
         // Same GObject, not a replacement: the row kept its identity.
         assert_eq!(before, after);
@@ -822,11 +712,11 @@ mod tests {
     #[test]
     fn keeps_the_same_row_object_when_nothing_changed() {
         let store = store_of(&[container("a", "one", "running")]);
-        let before = row_at(&store, 0);
+        let before = list::row_at::<ContainerObject>(&store, 0);
 
-        apply(&store, &[container("a", "one", "running")]);
+        list::apply::<ContainerObject>(&store, &[container("a", "one", "running")]);
 
-        assert_eq!(before, row_at(&store, 0));
+        assert_eq!(before, list::row_at::<ContainerObject>(&store, 0));
         assert!(before.matches(&container("a", "one", "running")));
     }
 
@@ -835,19 +725,19 @@ mod tests {
         let a = container("a", "one", "running");
         let b = container("b", "two", "exited");
         let store = store_of(&[a.clone(), b.clone()]);
-        let row_a = row_at(&store, 0);
+        let row_a = list::row_at::<ContainerObject>(&store, 0);
 
-        apply(&store, &[b, a]);
+        list::apply::<ContainerObject>(&store, &[b, a]);
 
         assert_eq!(ids(&store), ["b", "a"]);
         // "a" moved rather than being recreated.
-        assert_eq!(row_a, row_at(&store, 1));
+        assert_eq!(row_a, list::row_at::<ContainerObject>(&store, 1));
     }
 
     #[test]
     fn handles_a_wholesale_replacement() {
         let store = store_of(&[container("a", "one", "running")]);
-        apply(
+        list::apply::<ContainerObject>(
             &store,
             &[
                 container("x", "nine", "exited"),
