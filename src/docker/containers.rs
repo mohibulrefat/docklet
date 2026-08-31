@@ -55,7 +55,7 @@ pub fn short_id(id: &str) -> &str {
 /// Treat an explicit `null` as an empty value.
 ///
 /// Docker sends `null` rather than `{}` or `[]` for some absent collections.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(super) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Default + Deserialize<'de>,
