@@ -7,8 +7,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Box as GtkBox, ColumnView, Label, Orientation, PolicyType, ScrolledWindow, SingleSelection,
-    Widget,
+    Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ScrolledWindow,
+    SingleSelection, Widget,
 };
 
 use super::banner::Banner;
@@ -53,6 +53,8 @@ pub struct VolumesPage {
     selection: SingleSelection,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
+    name_entry: Entry,
+    driver_entry: Entry,
 }
 
 impl VolumesPage {
@@ -83,8 +85,32 @@ impl VolumesPage {
 
         let banner = Banner::new();
 
+        let name_entry = Entry::builder()
+            .placeholder_text("volume name")
+            .hexpand(true)
+            .build();
+        let driver_entry = Entry::builder()
+            .placeholder_text("driver (local)")
+            .width_chars(14)
+            .build();
+        let create_button = Button::with_label("Create");
+        create_button.add_css_class("suggested-action");
+
+        let actions = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        actions.append(&name_entry);
+        actions.append(&driver_entry);
+        actions.append(&create_button);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
 
@@ -96,10 +122,61 @@ impl VolumesPage {
             selection,
             banner,
             refreshing: Rc::new(Cell::new(false)),
+            name_entry,
+            driver_entry,
+        });
+
+        create_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.create_volume();
+                }
+            }
+        });
+        page.name_entry.connect_activate({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.create_volume();
+                }
+            }
         });
 
         page.refresh();
         page
+    }
+
+    /// Create a volume from the entries.
+    fn create_volume(self: &Rc<Self>) {
+        let name = self.name_entry.text().trim().to_string();
+        if name.is_empty() {
+            self.show_error("Enter a name for the volume.");
+            return;
+        }
+        let driver = self.driver_entry.text().trim().to_string();
+
+        self.banner.clear();
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let created = {
+                let (name, driver) = (name.clone(), driver.clone());
+                gio::spawn_blocking(move || Docker::connect()?.create_volume(&name, &driver)).await
+            };
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match created {
+                Ok(Ok(())) => {
+                    page.name_entry.set_text("");
+                    page.driver_entry.set_text("");
+                    page.refresh();
+                }
+                Ok(Err(e)) => page.show_error(&format!("Could not create {name}. {e}")),
+                Err(_) => page.show_error(&format!("Could not create {name}.")),
+            }
+        });
     }
 
     pub fn widget(&self) -> &Widget {

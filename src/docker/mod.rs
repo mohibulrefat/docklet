@@ -213,6 +213,15 @@ mod tests {
             sent.lines().next().unwrap_or_default().to_string()
         }
 
+        /// The request body, for asserting on what was sent.
+        fn sent_body(&self) -> String {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        }
+
         /// Whether the request carried a given header line.
         fn sent_header(&self, header: &str) -> bool {
             let sent = self.sent.lock().expect("request recorded");
@@ -456,6 +465,42 @@ mod tests {
             }
             other => panic!("expected 409, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn creates_a_volume() {
+        let server = serve(with_length("201 Created", r#"{"Name":"data"}"#));
+        assert!(server.docker.create_volume("data", "").is_ok());
+        assert_eq!(server.request_line(), "POST /volumes/create HTTP/1.1");
+    }
+
+    #[test]
+    fn defaults_a_volume_to_the_local_driver() {
+        // An empty driver field must not be sent as an empty string.
+        let server = serve(with_length("201 Created", "{}"));
+        let _ = server.docker.create_volume("data", "  ");
+        assert!(
+            server.sent_body().contains(r#""Driver":"local""#),
+            "body was {}",
+            server.sent_body()
+        );
+    }
+
+    #[test]
+    fn removes_a_volume() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_volume("data", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /volumes/data HTTP/1.1");
+    }
+
+    #[test]
+    fn force_removes_a_volume() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_volume("data", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /volumes/data?force=true HTTP/1.1"
+        );
     }
 
     #[test]
