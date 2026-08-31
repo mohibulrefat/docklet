@@ -4,6 +4,7 @@ use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, Grid, Label, Orientation, Separator, Widget};
 
 use super::object::ContainerObject;
+use crate::docker::Inspect;
 
 /// A read-only view of one container.
 pub struct DetailView {
@@ -15,6 +16,11 @@ pub struct DetailView {
     image: Label,
     state: Label,
     status: Label,
+    created: Label,
+    command: Label,
+    restart: Label,
+    networks: Label,
+    mounts: Label,
 }
 
 impl DetailView {
@@ -50,6 +56,11 @@ impl DetailView {
         let image = field(&grid, 2, "Image", false);
         let state = field(&grid, 3, "State", false);
         let status = field(&grid, 4, "Status", false);
+        let created = field(&grid, 5, "Created", false);
+        let command = field(&grid, 6, "Command", true);
+        let restart = field(&grid, 7, "Restart", false);
+        let networks = field(&grid, 8, "Networks", false);
+        let mounts = field(&grid, 9, "Mounts", false);
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(&header);
@@ -66,6 +77,11 @@ impl DetailView {
             image,
             state,
             status,
+            created,
+            command,
+            restart,
+            networks,
+            mounts,
         }
     }
 
@@ -82,6 +98,9 @@ impl DetailView {
     }
 
     /// Fill the pane from what the list already knows.
+    ///
+    /// The inspect fields are blanked rather than left stale, so a slow inspect
+    /// never shows the previous container's details next to this one's name.
     pub fn show(&self, container: &ContainerObject) {
         self.title.set_text(&container.name());
         self.name.set_text(&container.name());
@@ -89,6 +108,26 @@ impl DetailView {
         self.image.set_text(&container.image());
         self.state.set_text(&container.state());
         self.status.set_text(&container.status());
+
+        for label in [
+            &self.created,
+            &self.command,
+            &self.restart,
+            &self.networks,
+            &self.mounts,
+        ] {
+            label.set_text("");
+        }
+    }
+
+    /// Fill in the fields that only a full inspect provides.
+    pub fn set_inspect(&self, inspect: &Inspect) {
+        self.created.set_text(&inspect.created);
+        self.command.set_text(&inspect.command());
+        self.restart
+            .set_text(&inspect.host_config.restart_policy.name);
+        self.networks.set_text(&inspect.networks());
+        self.mounts.set_text(&inspect.mount_list());
     }
 }
 

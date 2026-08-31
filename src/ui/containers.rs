@@ -203,6 +203,28 @@ impl ContainersPage {
         self.scrolled.set_visible(false);
         self.empty.set_visible(false);
         self.detail.set_visible(true);
+
+        self.load_inspect(&row.id());
+    }
+
+    /// Fetch the fields only a full inspect provides.
+    fn load_inspect(self: &Rc<Self>, id: &str) {
+        let id = id.to_string();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let inspected =
+                gio::spawn_blocking(move || Docker::connect()?.inspect_container(&id)).await;
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match inspected {
+                Ok(Ok(inspect)) => page.detail.set_inspect(&inspect),
+                Ok(Err(e)) => page.show_error(&format!("Could not inspect container. {e}")),
+                Err(_) => page.show_error("Could not inspect container."),
+            }
+        });
     }
 
     /// Return to the list.

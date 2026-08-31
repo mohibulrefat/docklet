@@ -75,7 +75,104 @@ impl Docker {
     }
 }
 
+/// The parts of `/containers/{id}/json` Docklet displays.
+///
+/// The full inspect payload is enormous and mostly unused. Only fields that are
+/// actually rendered appear here — state and status already come from the list,
+/// so they are deliberately absent rather than duplicated.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Inspect {
+    /// RFC 3339, displayed verbatim rather than reformatted.
+    #[serde(rename = "Created", default)]
+    pub created: String,
+    #[serde(rename = "Config", default)]
+    pub config: InspectConfig,
+    #[serde(rename = "HostConfig", default)]
+    pub host_config: InspectHostConfig,
+    #[serde(rename = "NetworkSettings", default)]
+    pub network_settings: NetworkSettings,
+    #[serde(rename = "Mounts", default, deserialize_with = "null_as_default")]
+    pub mounts: Vec<Mount>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InspectConfig {
+    #[serde(rename = "Cmd", default, deserialize_with = "null_as_default")]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InspectHostConfig {
+    #[serde(rename = "RestartPolicy", default)]
+    pub restart_policy: RestartPolicy,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RestartPolicy {
+    #[serde(rename = "Name", default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NetworkSettings {
+    #[serde(rename = "Networks", default, deserialize_with = "null_as_default")]
+    pub networks: HashMap<String, NetworkEndpoint>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NetworkEndpoint {
+    #[serde(rename = "IPAddress", default)]
+    pub ip_address: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Mount {
+    #[serde(rename = "Source", default)]
+    pub source: String,
+    #[serde(rename = "Destination", default)]
+    pub destination: String,
+}
+
+impl Inspect {
+    /// The command line, joined for display.
+    pub fn command(&self) -> String {
+        self.config.cmd.join(" ")
+    }
+
+    /// Networks as `name (ip)`, comma separated.
+    pub fn networks(&self) -> String {
+        let mut names: Vec<String> = self
+            .network_settings
+            .networks
+            .iter()
+            .map(|(name, endpoint)| {
+                if endpoint.ip_address.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name} ({})", endpoint.ip_address)
+                }
+            })
+            .collect();
+        names.sort();
+        names.join(", ")
+    }
+
+    /// Mounts as `source -> destination`, one per line.
+    pub fn mount_list(&self) -> String {
+        self.mounts
+            .iter()
+            .map(|m| format!("{} \u{2192} {}", m.source, m.destination))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 impl Docker {
+    /// Inspect one container.
+    pub fn inspect_container(&self, id: &str) -> Result<Inspect, DockerError> {
+        self.get_json(&format!("/containers/{id}/json"))
+    }
+
     /// Start a stopped container.
     pub fn start_container(&self, id: &str) -> Result<(), DockerError> {
         self.post(&format!("/containers/{id}/start"))
@@ -186,6 +283,62 @@ mod tests {
     #[test]
     fn leaves_an_already_short_id_alone() {
         assert_eq!(parsed()[1].short_id(), "abc123");
+    }
+
+    /// Trimmed from a real `/containers/{id}/json` response.
+    const INSPECT: &str = r#"{
+        "Created": "2026-08-31T09:50:08.400881773Z",
+        "State": {"Status": "running", "Running": true, "ExitCode": 0},
+        "Config": {"Image": "alpine:latest", "Tty": false,
+                   "Cmd": ["sh", "-c", "echo hi"],
+                   "Env": ["PATH=/usr/bin"]},
+        "HostConfig": {"RestartPolicy": {"Name": "unless-stopped",
+                                         "MaximumRetryCount": 0}},
+        "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}},
+        "Mounts": [{"Source": "/host/data", "Destination": "/data"}]
+    }"#;
+
+    #[test]
+    fn parses_the_inspect_subset() {
+        let inspect: Inspect = serde_json::from_str(INSPECT).unwrap();
+        assert_eq!(inspect.created, "2026-08-31T09:50:08.400881773Z");
+        assert_eq!(inspect.host_config.restart_policy.name, "unless-stopped");
+    }
+
+    #[test]
+    fn joins_the_command_for_display() {
+        let inspect: Inspect = serde_json::from_str(INSPECT).unwrap();
+        assert_eq!(inspect.command(), "sh -c echo hi");
+    }
+
+    #[test]
+    fn shows_networks_with_their_addresses() {
+        let inspect: Inspect = serde_json::from_str(INSPECT).unwrap();
+        assert_eq!(inspect.networks(), "bridge (172.17.0.2)");
+    }
+
+    #[test]
+    fn omits_the_address_when_a_network_has_none() {
+        let inspect: Inspect =
+            serde_json::from_str(r#"{"NetworkSettings":{"Networks":{"host":{"IPAddress":""}}}}"#)
+                .unwrap();
+        assert_eq!(inspect.networks(), "host");
+    }
+
+    #[test]
+    fn lists_mounts_as_source_to_destination() {
+        let inspect: Inspect = serde_json::from_str(INSPECT).unwrap();
+        assert_eq!(inspect.mount_list(), "/host/data \u{2192} /data");
+    }
+
+    #[test]
+    fn tolerates_an_inspect_with_nothing_set() {
+        // Every field defaults, so a sparse or older payload still renders.
+        let inspect: Inspect = serde_json::from_str("{}").unwrap();
+        assert_eq!(inspect.created, "");
+        assert_eq!(inspect.command(), "");
+        assert_eq!(inspect.networks(), "");
+        assert_eq!(inspect.mount_list(), "");
     }
 
     #[test]
