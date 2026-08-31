@@ -243,7 +243,7 @@ impl DetailView {
 }
 
 /// A labelled row; returns the value label so it can be updated later.
-fn field(grid: &Grid, row: i32, name: &str, monospace: bool) -> Label {
+pub fn field(grid: &Grid, row: i32, name: &str, monospace: bool) -> Label {
     let key = Label::builder().label(name).halign(Align::End).build();
     key.add_css_class("dim-label");
 

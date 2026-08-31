@@ -7,15 +7,18 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ProgressBar,
-    Revealer, ScrolledWindow, SingleSelection, Widget, Window,
+    Align, Box as GtkBox, Button, ColumnView, Entry, Grid, Label, Orientation, PolicyType,
+    ProgressBar, Revealer, ScrolledWindow, Separator, SingleSelection, Widget, Window,
 };
 
 use super::banner::Banner;
+use super::detail::field;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Row};
 use super::object::ImageObject;
-use crate::docker::{now_seconds, Docker, DockerError, Image, PullEvent, StreamHandle};
+use crate::docker::{
+    now_seconds, Docker, DockerError, Image, ImageInspect, PullEvent, StreamHandle,
+};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -63,8 +66,112 @@ pub struct ImagesPage {
     progress_bar: ProgressBar,
     progress_label: Label,
     remove_button: Button,
+    detail: ImageDetail,
     /// The running pull. Dropping it cancels the stream.
     pull: RefCell<Option<StreamHandle>>,
+}
+
+/// A read-only view of one image.
+struct ImageDetail {
+    root: GtkBox,
+    back: Button,
+    title: Label,
+    platform: Label,
+    created: Label,
+    layers: Label,
+    entrypoint: Label,
+    command: Label,
+    ports: Label,
+    environment: Label,
+}
+
+impl ImageDetail {
+    fn new() -> Self {
+        let back = Button::from_icon_name("go-previous-symbolic");
+        back.set_tooltip_text(Some("Back to images"));
+
+        let title = Label::builder().halign(Align::Start).build();
+        title.add_css_class("heading");
+
+        let header = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        header.append(&back);
+        header.append(&title);
+
+        let grid = Grid::builder()
+            .row_spacing(6)
+            .column_spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        let platform = field(&grid, 0, "Platform", false);
+        let created = field(&grid, 1, "Created", false);
+        let layers = field(&grid, 2, "Layers", false);
+        let entrypoint = field(&grid, 3, "Entrypoint", true);
+        let command = field(&grid, 4, "Command", true);
+        let ports = field(&grid, 5, "Ports", false);
+        let environment = field(&grid, 6, "Environment", true);
+
+        let scrolled = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .child(&grid)
+            .build();
+
+        let root = GtkBox::new(Orientation::Vertical, 0);
+        root.append(&header);
+        root.append(&Separator::new(Orientation::Horizontal));
+        root.append(&scrolled);
+        root.set_visible(false);
+
+        ImageDetail {
+            root,
+            back,
+            title,
+            platform,
+            created,
+            layers,
+            entrypoint,
+            command,
+            ports,
+            environment,
+        }
+    }
+
+    /// Show the name immediately; inspect fields are blanked until they load.
+    fn show(&self, name: &str) {
+        self.title.set_text(name);
+        for label in [
+            &self.platform,
+            &self.created,
+            &self.layers,
+            &self.entrypoint,
+            &self.command,
+            &self.ports,
+            &self.environment,
+        ] {
+            label.set_text("");
+        }
+    }
+
+    fn set_inspect(&self, inspect: &ImageInspect) {
+        self.platform.set_text(&inspect.platform());
+        self.created.set_text(&inspect.created);
+        self.layers.set_text(&inspect.layer_count().to_string());
+        self.entrypoint.set_text(&inspect.entrypoint());
+        self.command.set_text(&inspect.command());
+        self.ports.set_text(&inspect.ports());
+        self.environment.set_text(&inspect.environment());
+    }
 }
 
 impl ImagesPage {
@@ -148,12 +255,15 @@ impl ImagesPage {
             .reveal_child(false)
             .build();
 
+        let detail = ImageDetail::new();
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
         root.append(&progress);
         root.append(&scrolled);
         root.append(&empty);
+        root.append(&detail.root);
 
         let page = Rc::new(ImagesPage {
             root,
@@ -169,6 +279,7 @@ impl ImagesPage {
             progress_bar,
             progress_label,
             remove_button,
+            detail,
             pull: RefCell::new(None),
         });
 
@@ -217,8 +328,70 @@ impl ImagesPage {
             }
         });
 
+        view.connect_activate({
+            let page = Rc::downgrade(&page);
+            move |_, _| {
+                if let Some(page) = page.upgrade() {
+                    page.open_detail();
+                }
+            }
+        });
+        page.detail.back.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.close_detail();
+                }
+            }
+        });
+
         page.refresh();
         page
+    }
+
+    /// Show the detail pane for the selected image.
+    fn open_detail(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let name = match row.repository().as_str() {
+            "<none>" => row.short_id(),
+            repository => format!("{repository}:{}", row.tag()),
+        };
+        self.detail.show(&name);
+
+        self.scrolled.set_visible(false);
+        self.empty.set_visible(false);
+        self.detail.root.set_visible(true);
+
+        let id = row.id();
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let inspected =
+                gio::spawn_blocking(move || Docker::connect()?.inspect_image(&id)).await;
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match inspected {
+                Ok(Ok(inspect)) => page.detail.set_inspect(&inspect),
+                Ok(Err(e)) => page.show_error(&format!("Could not inspect image. {e}")),
+                Err(_) => page.show_error("Could not inspect image."),
+            }
+        });
+    }
+
+    /// Return to the list.
+    fn close_detail(self: &Rc<Self>) {
+        self.detail.root.set_visible(false);
+        let is_empty = self.store.n_items() == 0;
+        self.empty.set_visible(is_empty);
+        self.scrolled.set_visible(!is_empty);
+    }
+
+    /// Whether the detail pane is showing.
+    fn showing_detail(&self) -> bool {
+        self.detail.root.is_visible()
     }
 
     /// Remove the selected image, after confirming.
@@ -393,9 +566,11 @@ impl ImagesPage {
             match listed {
                 Ok(Ok(images)) => {
                     list::apply::<ImageObject>(&page.store, &images);
-                    let is_empty = page.store.n_items() == 0;
-                    page.empty.set_visible(is_empty);
-                    page.scrolled.set_visible(!is_empty);
+                    if !page.showing_detail() {
+                        let is_empty = page.store.n_items() == 0;
+                        page.empty.set_visible(is_empty);
+                        page.scrolled.set_visible(!is_empty);
+                    }
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list images. {e}")),
                 Err(_) => page.show_error("Could not list images."),

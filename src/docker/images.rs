@@ -136,6 +136,80 @@ pub fn now_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// The parts of `/images/{id}/json` Docklet displays.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ImageInspect {
+    #[serde(rename = "Architecture", default)]
+    pub architecture: String,
+    #[serde(rename = "Os", default)]
+    pub os: String,
+    #[serde(rename = "Created", default)]
+    pub created: String,
+    #[serde(rename = "Config", default)]
+    pub config: ImageConfig,
+    #[serde(rename = "RootFS", default)]
+    pub root_fs: RootFs,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ImageConfig {
+    #[serde(rename = "Cmd", default, deserialize_with = "null_as_default")]
+    pub cmd: Vec<String>,
+    #[serde(rename = "Entrypoint", default, deserialize_with = "null_as_default")]
+    pub entrypoint: Vec<String>,
+    #[serde(rename = "Env", default, deserialize_with = "null_as_default")]
+    pub env: Vec<String>,
+    #[serde(rename = "ExposedPorts", default, deserialize_with = "null_as_default")]
+    pub exposed_ports: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RootFs {
+    #[serde(rename = "Layers", default, deserialize_with = "null_as_default")]
+    pub layers: Vec<String>,
+}
+
+impl ImageInspect {
+    /// `linux/amd64`, as Docker writes platforms.
+    pub fn platform(&self) -> String {
+        match (self.os.as_str(), self.architecture.as_str()) {
+            ("", "") => String::new(),
+            (os, "") => os.to_string(),
+            ("", arch) => arch.to_string(),
+            (os, arch) => format!("{os}/{arch}"),
+        }
+    }
+
+    pub fn command(&self) -> String {
+        self.config.cmd.join(" ")
+    }
+
+    pub fn entrypoint(&self) -> String {
+        self.config.entrypoint.join(" ")
+    }
+
+    /// Exposed ports, sorted so the order does not shift between refreshes.
+    pub fn ports(&self) -> String {
+        let mut ports: Vec<&str> = self
+            .config
+            .exposed_ports
+            .keys()
+            .map(String::as_str)
+            .collect();
+        ports.sort_unstable();
+        ports.join(", ")
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.root_fs.layers.len()
+    }
+
+    /// Environment, one per line.
+    pub fn environment(&self) -> String {
+        self.config.env.join("\n")
+    }
+}
+
 /// What a pull reports as it runs.
 #[derive(Debug, PartialEq)]
 pub enum PullEvent {
@@ -265,6 +339,11 @@ impl Docker {
         self.get_json("/images/json?all=0")
     }
 
+    /// Inspect one image.
+    pub fn inspect_image(&self, id: &str) -> Result<ImageInspect, DockerError> {
+        self.get_json(&format!("/images/{id}/json"))
+    }
+
     /// Remove an image.
     ///
     /// An image a container still references is a 409 unless `force` is set.
@@ -379,6 +458,50 @@ mod tests {
         assert_eq!(relative_age(now - 120, now), "2 minutes ago");
         assert_eq!(relative_age(now - 2 * 30 * 86400, now), "2 months ago");
         assert_eq!(relative_age(now - 400 * 86400, now), "1 year ago");
+    }
+
+    /// Trimmed from a real `/images/nginx:latest/json` response.
+    const IMAGE_INSPECT: &str = r#"{
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Created": "2026-08-05T00:22:02.46355677Z",
+        "Config": {"Cmd": ["nginx", "-g", "daemon off;"],
+                   "Entrypoint": ["/docker-entrypoint.sh"],
+                   "Env": ["PATH=/usr/bin", "NGINX_VERSION=1.31"],
+                   "ExposedPorts": {"443/tcp": {}, "80/tcp": {}},
+                   "WorkingDir": null},
+        "RootFS": {"Type": "layers", "Layers": ["a", "b", "c", "d", "e", "f", "g"]}
+    }"#;
+
+    #[test]
+    fn parses_the_image_inspect_subset() {
+        let inspect: ImageInspect = serde_json::from_str(IMAGE_INSPECT).unwrap();
+        assert_eq!(inspect.platform(), "linux/amd64");
+        assert_eq!(inspect.command(), "nginx -g daemon off;");
+        assert_eq!(inspect.entrypoint(), "/docker-entrypoint.sh");
+        assert_eq!(inspect.layer_count(), 7);
+    }
+
+    #[test]
+    fn sorts_exposed_ports() {
+        // A HashMap iterates arbitrarily; the display must not shuffle.
+        let inspect: ImageInspect = serde_json::from_str(IMAGE_INSPECT).unwrap();
+        assert_eq!(inspect.ports(), "443/tcp, 80/tcp");
+    }
+
+    #[test]
+    fn lists_environment_one_per_line() {
+        let inspect: ImageInspect = serde_json::from_str(IMAGE_INSPECT).unwrap();
+        assert_eq!(inspect.environment(), "PATH=/usr/bin\nNGINX_VERSION=1.31");
+    }
+
+    #[test]
+    fn tolerates_an_image_inspect_with_nothing_set() {
+        let inspect: ImageInspect = serde_json::from_str("{}").unwrap();
+        assert_eq!(inspect.platform(), "");
+        assert_eq!(inspect.command(), "");
+        assert_eq!(inspect.ports(), "");
+        assert_eq!(inspect.layer_count(), 0);
     }
 
     #[test]
