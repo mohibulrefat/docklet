@@ -15,7 +15,7 @@ use gtk::{
 use super::banner::Banner;
 use super::detail::DetailView;
 use super::dialog::confirm;
-use super::list::{self, mono_column, text_column};
+use super::list::{self, mono_column, text_column, Loading};
 use super::object::ContainerObject;
 use crate::docker::{Docker, DockerError, LogEvent, StatsEvent, StreamHandle};
 
@@ -50,6 +50,7 @@ pub struct ContainersPage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    loading: Loading,
     /// The action bar; made insensitive while an action runs.
     actions: GtkBox,
     detail: DetailView,
@@ -124,9 +125,15 @@ impl ContainersPage {
 
         let detail = DetailView::new();
 
+        let loading = Loading::new();
+        loading.widget().set_halign(gtk::Align::Center);
+        loading.widget().set_valign(gtk::Align::Center);
+        loading.widget().set_vexpand(true);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
+        root.append(loading.widget());
         root.append(&scrolled);
         root.append(&empty);
         root.append(detail.widget());
@@ -137,6 +144,7 @@ impl ContainersPage {
             empty,
             store,
             selection,
+            loading,
             actions: actions.clone(),
             detail,
             banner,
@@ -603,12 +611,19 @@ impl ContainersPage {
         }
 
         let page = Rc::downgrade(self);
+        let showing_first_load = self.loading.start();
+        if showing_first_load {
+            self.scrolled.set_visible(false);
+            self.empty.set_visible(false);
+        }
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.containers(true)).await;
 
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.loading.finish();
 
             match listed {
                 Ok(Ok(containers)) => {

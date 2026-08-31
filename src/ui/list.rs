@@ -1,13 +1,56 @@
 //! Shared machinery for the list pages.
 //!
-//! Containers, images, volumes and networks are all "a Docker list rendered in
-//! a `ColumnView`". The diffing is subtle enough that copying it per page would
-//! mean copying its bugs too, so it lives here once.
+//! Containers, images, volumes, networks and Compose are all "a Docker list
+//! rendered in a `ColumnView`". The diffing is subtle enough that copying it
+//! per page would mean copying its bugs too, so it lives here once.
+
+use std::cell::Cell;
 
 use gtk::gio;
 use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
-use gtk::{Align, ColumnViewColumn, Label, ListItem, SignalListItemFactory};
+use gtk::{Align, ColumnViewColumn, Label, ListItem, SignalListItemFactory, Spinner, Widget};
+
+/// Tracks whether a page's very first load is still running, and shows a
+/// spinner only for that one — a manual refresh afterwards never flickers
+/// the layout, since the list it is replacing is already sitting there.
+pub struct Loading {
+    spinner: Spinner,
+    first: Cell<bool>,
+}
+
+impl Loading {
+    pub fn new() -> Self {
+        let spinner = Spinner::builder().visible(false).build();
+        Loading {
+            spinner,
+            first: Cell::new(true),
+        }
+    }
+
+    pub fn widget(&self) -> &Widget {
+        self.spinner.upcast_ref()
+    }
+
+    /// Call when a refresh starts. Returns whether this is the first load —
+    /// the only time the caller should hide its list/empty-state in favour
+    /// of the spinner.
+    pub fn start(&self) -> bool {
+        let first = self.first.get();
+        if first {
+            self.spinner.set_visible(true);
+            self.spinner.start();
+        }
+        first
+    }
+
+    /// Call when the load completes, successfully or not.
+    pub fn finish(&self) {
+        self.spinner.stop();
+        self.spinner.set_visible(false);
+        self.first.set(false);
+    }
+}
 
 /// A row object backed by one Docker value.
 pub trait Row: IsA<gtk::glib::Object> {

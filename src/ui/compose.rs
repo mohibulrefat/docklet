@@ -16,7 +16,7 @@ use gtk::{
 };
 
 use super::banner::Banner;
-use super::list::{self, text_column, Row};
+use super::list::{self, text_column, Loading, Row};
 use super::logpane::LogPane;
 use super::object::ComposeObject;
 use crate::docker::{
@@ -67,6 +67,7 @@ pub struct ComposePage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    loading: Loading,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
     start_button: Button,
@@ -133,9 +134,15 @@ impl ComposePage {
         actions.append(&stop_button);
         actions.append(&logs_button);
 
+        let loading = Loading::new();
+        loading.widget().set_halign(gtk::Align::Center);
+        loading.widget().set_valign(gtk::Align::Center);
+        loading.widget().set_vexpand(true);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
+        root.append(loading.widget());
         root.append(&scrolled);
         root.append(&empty);
 
@@ -145,6 +152,7 @@ impl ComposePage {
             empty,
             store,
             selection,
+            loading,
             banner,
             refreshing: Rc::new(Cell::new(false)),
             start_button,
@@ -385,12 +393,18 @@ impl ComposePage {
         }
 
         let page = Rc::downgrade(self);
+        if self.loading.start() {
+            self.scrolled.set_visible(false);
+            self.empty.set_visible(false);
+        }
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.compose_projects()).await;
 
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.loading.finish();
             match listed {
                 Ok(Ok(projects)) => {
                     list::apply::<ComposeObject>(&page.store, &projects);

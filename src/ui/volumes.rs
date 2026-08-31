@@ -14,7 +14,7 @@ use gtk::{
 use super::banner::Banner;
 use super::detail::field;
 use super::dialog::confirm;
-use super::list::{self, mono_column, text_column, Row};
+use super::list::{self, mono_column, text_column, Loading, Row};
 use super::object::VolumeObject;
 use crate::docker::{Docker, DockerError, Volume};
 
@@ -53,10 +53,12 @@ pub struct VolumesPage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    loading: Loading,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
     name_entry: Entry,
     driver_entry: Entry,
+    create_button: Button,
     remove_button: Button,
     detail: VolumeDetail,
 }
@@ -224,9 +226,15 @@ impl VolumesPage {
 
         let detail = VolumeDetail::new();
 
+        let loading = Loading::new();
+        loading.widget().set_halign(Align::Center);
+        loading.widget().set_valign(Align::Center);
+        loading.widget().set_vexpand(true);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
+        root.append(loading.widget());
         root.append(&scrolled);
         root.append(&empty);
         root.append(&detail.root);
@@ -237,15 +245,17 @@ impl VolumesPage {
             empty,
             store,
             selection,
+            loading,
             banner,
             refreshing: Rc::new(Cell::new(false)),
             name_entry,
             driver_entry,
+            create_button,
             remove_button,
             detail,
         });
 
-        create_button.connect_clicked({
+        page.create_button.connect_clicked({
             let page = Rc::downgrade(&page);
             move |_| {
                 if let Some(page) = page.upgrade() {
@@ -420,6 +430,10 @@ impl VolumesPage {
         let driver = self.driver_entry.text().trim().to_string();
 
         self.banner.clear();
+        self.create_button.set_sensitive(false);
+        self.name_entry.set_sensitive(false);
+        self.driver_entry.set_sensitive(false);
+
         let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let created = {
@@ -430,6 +444,10 @@ impl VolumesPage {
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.create_button.set_sensitive(true);
+            page.name_entry.set_sensitive(true);
+            page.driver_entry.set_sensitive(true);
+
             match created {
                 Ok(Ok(())) => {
                     page.name_entry.set_text("");
@@ -464,12 +482,18 @@ impl VolumesPage {
         }
 
         let page = Rc::downgrade(self);
+        if self.loading.start() {
+            self.scrolled.set_visible(false);
+            self.empty.set_visible(false);
+        }
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.volumes()).await;
 
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.loading.finish();
             match listed {
                 Ok(Ok(volumes)) => {
                     list::apply::<VolumeObject>(&page.store, &volumes);

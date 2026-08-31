@@ -14,7 +14,7 @@ use gtk::{
 use super::banner::Banner;
 use super::detail::field;
 use super::dialog::confirm;
-use super::list::{self, mono_column, text_column, Row};
+use super::list::{self, mono_column, text_column, Loading, Row};
 use super::object::ImageObject;
 use crate::docker::{
     now_seconds, Docker, DockerError, Image, ImageInspect, PullEvent, StreamHandle,
@@ -58,6 +58,7 @@ pub struct ImagesPage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    loading: Loading,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
     reference: Entry,
@@ -257,10 +258,16 @@ impl ImagesPage {
 
         let detail = ImageDetail::new();
 
+        let loading = Loading::new();
+        loading.widget().set_halign(Align::Center);
+        loading.widget().set_valign(Align::Center);
+        loading.widget().set_vexpand(true);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
         root.append(&progress);
+        root.append(loading.widget());
         root.append(&scrolled);
         root.append(&empty);
         root.append(&detail.root);
@@ -271,6 +278,7 @@ impl ImagesPage {
             empty,
             store,
             selection,
+            loading,
             banner,
             refreshing: Rc::new(Cell::new(false)),
             reference,
@@ -556,12 +564,18 @@ impl ImagesPage {
         }
 
         let page = Rc::downgrade(self);
+        if self.loading.start() {
+            self.scrolled.set_visible(false);
+            self.empty.set_visible(false);
+        }
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.images()).await;
 
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.loading.finish();
 
             match listed {
                 Ok(Ok(images)) => {
