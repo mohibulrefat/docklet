@@ -20,6 +20,11 @@ use super::{Docker, DockerError};
 /// Header length for one multiplexed frame.
 const HEADER: usize = 8;
 
+/// How many lines a one-shot log fetch asks Docker for, when nothing more
+/// specific is wanted. Bounded so opening a chatty container's logs cannot
+/// pull in an unbounded amount of history.
+pub const DEFAULT_LOG_TAIL: usize = 500;
+
 /// Decodes a log stream, framed or raw.
 ///
 /// Feeding is incremental: a frame split across reads is held until the rest

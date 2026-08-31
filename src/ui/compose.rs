@@ -573,7 +573,8 @@ impl ComposeLogView {
             let fetched = gio::spawn_blocking(move || -> Result<(bool, String), DockerError> {
                 let docker = Docker::connect()?;
                 let tty = docker.inspect_container(&id_for_tty)?.config.tty;
-                let text = docker.container_logs(&id_for_tty, tty, 500)?;
+                let text =
+                    docker.container_logs(&id_for_tty, tty, crate::docker::DEFAULT_LOG_TAIL)?;
                 Ok((tty, text))
             })
             .await;
@@ -620,7 +621,7 @@ impl ComposeLogView {
 
         let (sender, receiver) = async_channel::bounded::<LogEvent>(64);
         let handle = match Docker::connect() {
-            Ok(docker) => docker.follow_logs(&id, tty, 500, sender),
+            Ok(docker) => docker.follow_logs(&id, tty, crate::docker::DEFAULT_LOG_TAIL, sender),
             Err(_) => return,
         };
         self.follow.replace(Some(handle));

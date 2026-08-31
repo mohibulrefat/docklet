@@ -21,10 +21,6 @@ use crate::docker::{Docker, DockerError, LogEvent, StatsEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
 
-/// How many log lines to fetch. Bounded so a chatty container cannot fill
-/// memory just by being opened.
-const LOG_TAIL: usize = 500;
-
 /// Colours for the state bullet. `alpha(currentColor, …)` follows the theme,
 /// so the stopped bullet stays legible in both light and dark.
 const STYLE: &str = "
@@ -352,9 +348,10 @@ impl ContainersPage {
         let page = Rc::downgrade(self);
 
         glib::spawn_future_local(async move {
-            let fetched =
-                gio::spawn_blocking(move || Docker::connect()?.container_logs(&id, tty, LOG_TAIL))
-                    .await;
+            let fetched = gio::spawn_blocking(move || {
+                Docker::connect()?.container_logs(&id, tty, crate::docker::DEFAULT_LOG_TAIL)
+            })
+            .await;
 
             let Some(page) = page.upgrade() else {
                 return;
@@ -390,7 +387,7 @@ impl ContainersPage {
         let (sender, receiver) = async_channel::bounded::<LogEvent>(64);
 
         let handle = match Docker::connect() {
-            Ok(docker) => docker.follow_logs(&id, tty, LOG_TAIL, sender),
+            Ok(docker) => docker.follow_logs(&id, tty, crate::docker::DEFAULT_LOG_TAIL, sender),
             Err(e) => {
                 self.show_error(&format!("Could not follow logs. {e}"));
                 self.detail.set_following(false);

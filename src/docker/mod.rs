@@ -25,7 +25,7 @@ pub use compose::{ComposeProject, ProjectActionResult, ProjectState};
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
 pub use images::{human_size, now_seconds, Image, ImageInspect, PullEvent};
-pub use logs::LogEvent;
+pub use logs::{LogEvent, DEFAULT_LOG_TAIL};
 pub use networks::Network;
 pub use stats::StatsEvent;
 pub use stream::StreamHandle;
