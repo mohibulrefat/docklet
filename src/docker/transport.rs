@@ -1,11 +1,12 @@
 //! Connecting to a Docker endpoint.
 //!
 //! This is the seam that keeps the unix-socket-only decision reversible.
-//! `http` is written against the boxed stream returned here rather than against
-//! `UnixStream`, so adding `tcp://`, `ssh://` or TLS later means a new arm in
-//! `connect` and nothing else.
+//! `http` is written against [`Connection`] rather than a socket type, so
+//! adding `tcp://`, `ssh://` or TLS later means a new arm in `connect` and a
+//! second variant inside `Connection` — nothing above this module changes.
 
 use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -14,28 +15,71 @@ use super::DockerError;
 
 /// How long a single request may wait to connect, and to read a response.
 ///
-/// Streaming endpoints (logs, stats) will need to opt out of the read timeout;
-/// that arrives with the streaming reader.
+/// Streaming endpoints clear this: a followed log is idle for as long as the
+/// container is quiet, which is not a timeout.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A connected byte stream. Boxed so the transport can vary without `http`
-/// knowing which kind it holds.
-pub trait Stream: Read + Write + Send {}
+/// An open connection to Docker.
+pub struct Connection {
+    socket: UnixStream,
+}
 
-impl<T: Read + Write + Send> Stream for T {}
+impl Connection {
+    /// A second handle to the same connection.
+    ///
+    /// Used to shut a stream down from another thread while its reader is
+    /// blocked, which is the only way to interrupt a blocking read without
+    /// polling for it.
+    pub fn try_clone(&self) -> Result<Connection, DockerError> {
+        let socket = self
+            .socket
+            .try_clone()
+            .map_err(|e| DockerError::Protocol(e.to_string()))?;
+        Ok(Connection { socket })
+    }
+
+    /// Stop a blocked read on this connection.
+    pub fn shutdown_read(&self) {
+        // Already-closed is the normal case when a stream ended on its own.
+        let _ = self.socket.shutdown(Shutdown::Read);
+    }
+
+    /// Set or clear the read timeout. `None` waits indefinitely.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), DockerError> {
+        self.socket
+            .set_read_timeout(timeout)
+            .map_err(|e| DockerError::Protocol(e.to_string()))
+    }
+}
+
+impl Read for Connection {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.read(buf)
+    }
+}
+
+impl Write for Connection {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.socket.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.socket.flush()
+    }
+}
 
 /// Open a connection to the endpoint.
-pub fn connect(endpoint: &Endpoint) -> Result<Box<dyn Stream>, DockerError> {
+pub fn connect(endpoint: &Endpoint) -> Result<Connection, DockerError> {
     match endpoint {
         Endpoint::Unix(path) => {
-            let stream = UnixStream::connect(path).map_err(|e| connect_error(e, endpoint))?;
-            stream
+            let socket = UnixStream::connect(path).map_err(|e| connect_error(e, endpoint))?;
+            socket
                 .set_read_timeout(Some(TIMEOUT))
                 .map_err(|e| connect_error(e, endpoint))?;
-            stream
+            socket
                 .set_write_timeout(Some(TIMEOUT))
                 .map_err(|e| connect_error(e, endpoint))?;
-            Ok(Box::new(stream))
+            Ok(Connection { socket })
         }
     }
 }

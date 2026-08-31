@@ -5,15 +5,27 @@
 //! bytes into typed values. Nothing in here imports GTK, which is what keeps it
 //! testable without a UI — or a daemon.
 
+mod containers;
 mod endpoint;
 mod http;
+mod images;
+mod logs;
+mod networks;
+mod stream;
 mod transport;
+mod volumes;
 
 use std::fmt;
 
 use serde::Deserialize;
 
+pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
+pub use images::{now_seconds, Image, ImageInspect, PullEvent};
+pub use logs::LogEvent;
+pub use networks::Network;
+pub use stream::StreamHandle;
+pub use volumes::Volume;
 
 /// Everything that can go wrong talking to Docker.
 ///
@@ -105,6 +117,28 @@ impl Docker {
         serde_json::from_slice(&body).map_err(|e| DockerError::Decode(e.to_string()))
     }
 
+    /// POST a path with no body, discarding the response.
+    ///
+    /// Docker's lifecycle endpoints answer `204 No Content` on success and
+    /// `304 Not Modified` when the container is already in the requested
+    /// state — both mean the caller got what it asked for.
+    pub fn post(&self, path: &str) -> Result<(), DockerError> {
+        self.request("POST", path, None)?;
+        Ok(())
+    }
+
+    /// DELETE a path, discarding the response.
+    pub fn delete(&self, path: &str) -> Result<(), DockerError> {
+        self.request("DELETE", path, None)?;
+        Ok(())
+    }
+
+    /// POST a JSON body, returning the raw response.
+    pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Vec<u8>, DockerError> {
+        let encoded = serde_json::to_vec(body).map_err(|e| DockerError::Decode(e.to_string()))?;
+        self.request("POST", path, Some(&encoded))
+    }
+
     /// Check that the daemon is alive.
     ///
     /// `/_ping` is the cheapest endpoint Docker offers — it answers `OK` and
@@ -157,6 +191,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     /// A throwaway unix socket serving one canned response, then closing.
     ///
@@ -169,6 +204,31 @@ mod tests {
     struct Server {
         docker: Docker,
         path: PathBuf,
+        /// What the client actually sent, for asserting method and path.
+        sent: Arc<Mutex<String>>,
+    }
+
+    impl Server {
+        /// The request line, e.g. `POST /containers/abc/start HTTP/1.1`.
+        fn request_line(&self) -> String {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.lines().next().unwrap_or_default().to_string()
+        }
+
+        /// The request body, for asserting on what was sent.
+        fn sent_body(&self) -> String {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        /// Whether the request carried a given header line.
+        fn sent_header(&self, header: &str) -> bool {
+            let sent = self.sent.lock().expect("request recorded");
+            sent.lines().any(|l| l.eq_ignore_ascii_case(header))
+        }
     }
 
     impl Drop for Server {
@@ -187,10 +247,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let listener = UnixListener::bind(&path).unwrap();
+        let sent = Arc::new(Mutex::new(String::new()));
+        let recorder = sent.clone();
+
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0; 1024];
-                let _ = stream.read(&mut buf);
+                let read = stream.read(&mut buf).unwrap_or(0);
+                *recorder.lock().expect("recorder") =
+                    String::from_utf8_lossy(&buf[..read]).to_string();
                 let _ = stream.write_all(response.as_bytes());
             }
         });
@@ -200,6 +265,7 @@ mod tests {
                 endpoint: Endpoint::Unix(path.clone()),
             },
             path,
+            sent,
         }
     }
 
@@ -210,6 +276,11 @@ mod tests {
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    /// A bodyless response, as Docker sends for lifecycle actions.
+    fn status_only(status: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n")
     }
 
     /// The same, as a single chunk, to exercise the chunked path Docker uses.
@@ -265,6 +336,173 @@ mod tests {
             Err(DockerError::Unreachable(msg)) => assert!(msg.contains("daemon running"), "{msg}"),
             other => panic!("expected Unreachable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn starts_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.start_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/start HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn declares_a_zero_length_body_on_post() {
+        // Without this the daemon can sit waiting for a body that never comes.
+        let server = serve(status_only("204 No Content"));
+        let _ = server.docker.start_container("abc123");
+        assert!(server.sent_header("Content-Length: 0"));
+    }
+
+    #[test]
+    fn treats_already_started_as_success() {
+        // 304 means the container was already running — not a failure.
+        let server = serve(status_only("304 Not Modified"));
+        assert!(server.docker.start_container("abc123").is_ok());
+    }
+
+    #[test]
+    fn reports_a_missing_container_on_start() {
+        let server = serve(with_length(
+            "404 Not Found",
+            r#"{"message":"No such container: abc123"}"#,
+        ));
+        match server.docker.start_container("abc123") {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 404);
+                assert_eq!(message, "No such container: abc123");
+            }
+            other => panic!("expected 404, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stops_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.stop_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/stop HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn treats_already_stopped_as_success() {
+        let server = serve(status_only("304 Not Modified"));
+        assert!(server.docker.stop_container("abc123").is_ok());
+    }
+
+    #[test]
+    fn restarts_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.restart_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/restart HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn removes_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_container("abc123", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /containers/abc123 HTTP/1.1");
+    }
+
+    #[test]
+    fn asks_for_force_when_told_to() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_container("abc123", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /containers/abc123?force=true HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn reports_a_running_container_as_a_conflict() {
+        // 409 is what the UI keys on to offer a forced removal.
+        let server = serve(with_length(
+            "409 Conflict",
+            r#"{"message":"You cannot remove a running container"}"#,
+        ));
+        match server.docker.remove_container("abc123", false) {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 409);
+                assert!(message.contains("running container"));
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removes_an_image() {
+        let server = serve(with_length("200 OK", r#"[{"Deleted":"sha256:abc"}]"#));
+        assert!(server.docker.remove_image("sha256:abc", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /images/sha256:abc HTTP/1.1");
+    }
+
+    #[test]
+    fn force_removes_an_image() {
+        let server = serve(with_length("200 OK", "[]"));
+        assert!(server.docker.remove_image("abc", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /images/abc?force=true HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn reports_an_image_still_in_use_as_a_conflict() {
+        let server = serve(with_length(
+            "409 Conflict",
+            r#"{"message":"conflict: unable to delete abc (must be forced)"}"#,
+        ));
+        match server.docker.remove_image("abc", false) {
+            Err(DockerError::Api { status, message }) => {
+                assert_eq!(status, 409);
+                assert!(message.contains("must be forced"));
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn creates_a_volume() {
+        let server = serve(with_length("201 Created", r#"{"Name":"data"}"#));
+        assert!(server.docker.create_volume("data", "").is_ok());
+        assert_eq!(server.request_line(), "POST /volumes/create HTTP/1.1");
+    }
+
+    #[test]
+    fn defaults_a_volume_to_the_local_driver() {
+        // An empty driver field must not be sent as an empty string.
+        let server = serve(with_length("201 Created", "{}"));
+        let _ = server.docker.create_volume("data", "  ");
+        assert!(
+            server.sent_body().contains(r#""Driver":"local""#),
+            "body was {}",
+            server.sent_body()
+        );
+    }
+
+    #[test]
+    fn removes_a_volume() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_volume("data", false).is_ok());
+        assert_eq!(server.request_line(), "DELETE /volumes/data HTTP/1.1");
+    }
+
+    #[test]
+    fn force_removes_a_volume() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.remove_volume("data", true).is_ok());
+        assert_eq!(
+            server.request_line(),
+            "DELETE /volumes/data?force=true HTTP/1.1"
+        );
     }
 
     #[test]

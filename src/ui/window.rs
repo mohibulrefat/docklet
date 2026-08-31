@@ -6,10 +6,14 @@
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use gtk::{
-    Align, Application, ApplicationWindow, HeaderBar, Label, Orientation, Separator, Stack,
+    Align, Application, ApplicationWindow, Button, HeaderBar, Label, Orientation, Separator, Stack,
     StackSwitcher,
 };
 
+use super::containers::ContainersPage;
+use super::images::ImagesPage;
+use super::networks::NetworksPage;
+use super::volumes::VolumesPage;
 use crate::docker::Docker;
 
 const LOG_DOMAIN: &str = "docklet";
@@ -18,14 +22,37 @@ const DEFAULT_HEIGHT: i32 = 600;
 
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
+    let containers = ContainersPage::new();
+    let images = ImagesPage::new();
+    let volumes = VolumesPage::new();
+    let networks = NetworksPage::new();
+
     let stack = Stack::builder().vexpand(true).build();
-    stack.add_titled(&placeholder("Containers"), Some("containers"), "Containers");
-    stack.add_titled(&placeholder("Images"), Some("images"), "Images");
-    stack.add_titled(&placeholder("Volumes"), Some("volumes"), "Volumes");
-    stack.add_titled(&placeholder("Networks"), Some("networks"), "Networks");
+    stack.add_titled(containers.widget(), Some("containers"), "Containers");
+    stack.add_titled(images.widget(), Some("images"), "Images");
+    stack.add_titled(volumes.widget(), Some("volumes"), "Volumes");
+    stack.add_titled(networks.widget(), Some("networks"), "Networks");
+
+    let refresh = Button::from_icon_name("view-refresh-symbolic");
+    refresh.set_tooltip_text(Some("Refresh"));
+    refresh.connect_clicked({
+        let containers = containers.clone();
+        let images = images.clone();
+        let volumes = volumes.clone();
+        let networks = networks.clone();
+        let stack = stack.clone();
+        // Refresh whichever page is showing.
+        move |_| match stack.visible_child_name().as_deref() {
+            Some("images") => images.refresh(),
+            Some("volumes") => volumes.refresh(),
+            Some("networks") => networks.refresh(),
+            _ => containers.refresh(),
+        }
+    });
 
     let header = HeaderBar::new();
     header.set_title_widget(Some(&StackSwitcher::builder().stack(&stack).build()));
+    header.pack_start(&refresh);
 
     let status = status_bar();
     check_docker(&status);
@@ -44,14 +71,6 @@ pub fn build(app: &Application) -> ApplicationWindow {
         .build();
     window.set_titlebar(Some(&header));
     window
-}
-
-/// A page that has not been implemented yet.
-fn placeholder(name: &str) -> Label {
-    let label = Label::new(Some(name));
-    label.add_css_class("dim-label");
-    label.set_vexpand(true);
-    label
 }
 
 /// Report Docker's status in the footer.
