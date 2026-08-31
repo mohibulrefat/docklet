@@ -8,13 +8,14 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ScrolledWindow,
-    SingleSelection, Widget,
+    SingleSelection, Widget, Window,
 };
 
 use super::banner::Banner;
+use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Row};
 use super::object::VolumeObject;
-use crate::docker::{Docker, Volume};
+use crate::docker::{Docker, DockerError, Volume};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -55,6 +56,7 @@ pub struct VolumesPage {
     refreshing: Rc<Cell<bool>>,
     name_entry: Entry,
     driver_entry: Entry,
+    remove_button: Button,
 }
 
 impl VolumesPage {
@@ -108,6 +110,11 @@ impl VolumesPage {
         actions.append(&driver_entry);
         actions.append(&create_button);
 
+        let remove_button = Button::with_label("Remove");
+        remove_button.add_css_class("destructive-action");
+        remove_button.set_sensitive(false);
+        actions.append(&remove_button);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
@@ -124,6 +131,7 @@ impl VolumesPage {
             refreshing: Rc::new(Cell::new(false)),
             name_entry,
             driver_entry,
+            remove_button,
         });
 
         create_button.connect_clicked({
@@ -143,8 +151,82 @@ impl VolumesPage {
             }
         });
 
+        page.remove_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.remove_selected();
+                }
+            }
+        });
+        page.selection.connect_selected_item_notify({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    let ready = page.selected().is_some();
+                    page.remove_button.set_sensitive(ready);
+                }
+            }
+        });
+
         page.refresh();
         page
+    }
+
+    /// Remove the selected volume, after confirming.
+    fn remove_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let name = row.name();
+        let parent = self.root.root().and_downcast::<Window>();
+        self.banner.clear();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let confirmed = confirm(
+                parent.as_ref(),
+                &format!("Remove volume {name}?"),
+                "Everything stored in the volume is deleted. This cannot be undone.",
+                "Remove",
+            )
+            .await;
+            if !confirmed {
+                return;
+            }
+
+            match remove(&name, false).await {
+                Ok(()) => {}
+                Err(DockerError::Api { status: 409, .. }) => {
+                    let forced = confirm(
+                        parent.as_ref(),
+                        &format!("{name} is still in use."),
+                        "A container still mounts this volume.",
+                        "Force remove",
+                    )
+                    .await;
+                    if !forced {
+                        return;
+                    }
+                    if let Err(e) = remove(&name, true).await {
+                        if let Some(page) = page.upgrade() {
+                            page.show_error(&format!("Could not force remove {name}. {e}"));
+                        }
+                        return;
+                    }
+                }
+                Err(e) => {
+                    if let Some(page) = page.upgrade() {
+                        page.show_error(&format!("Could not remove {name}. {e}"));
+                    }
+                    return;
+                }
+            }
+
+            if let Some(page) = page.upgrade() {
+                page.refresh();
+            }
+        });
     }
 
     /// Create a volume from the entries.
@@ -183,7 +265,6 @@ impl VolumesPage {
         self.root.upcast_ref()
     }
 
-    #[allow(dead_code)]
     fn selected(&self) -> Option<VolumeObject> {
         self.selection
             .selected_item()
@@ -221,4 +302,12 @@ impl VolumesPage {
             page.refreshing.set(false);
         });
     }
+}
+
+/// Remove a volume off the main thread.
+async fn remove(name: &str, force: bool) -> Result<(), DockerError> {
+    let name = name.to_string();
+    gio::spawn_blocking(move || Docker::connect()?.remove_volume(&name, force))
+        .await
+        .unwrap_or_else(|_| Err(DockerError::Protocol("the remove task panicked".into())))
 }
