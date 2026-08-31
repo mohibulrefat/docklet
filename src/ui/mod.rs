@@ -4,6 +4,7 @@
 //! HTTP. It calls typed functions on `docker` and renders what comes back.
 
 mod banner;
+mod compose;
 mod containers;
 mod detail;
 mod dialog;

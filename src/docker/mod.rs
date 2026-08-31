@@ -21,7 +21,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-pub use compose::{group_projects, ComposeProject, ProjectState};
+pub use compose::{ComposeProject, ProjectState};
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
 pub use images::{human_size, now_seconds, Image, ImageInspect, PullEvent};

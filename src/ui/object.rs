@@ -10,7 +10,7 @@ use gtk::glib;
 use gtk::subclass::prelude::*;
 
 use super::list::Row;
-use crate::docker::{Container, Image, Network, Volume};
+use crate::docker::{ComposeProject, Container, Image, Network, ProjectState, Volume};
 
 mod imp {
     use super::*;
@@ -298,5 +298,70 @@ impl NetworkObject {
     /// Docker owns this network and will not let it be removed.
     pub fn is_predefined(&self) -> bool {
         self.imp().predefined.get()
+    }
+}
+
+mod compose_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct ComposeObject {
+        pub name: RefCell<String>,
+        pub services: Cell<usize>,
+        pub state: RefCell<String>,
+        pub working_dir: RefCell<String>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for ComposeObject {
+        const NAME: &'static str = "DockletComposeObject";
+        type Type = super::ComposeObject;
+    }
+
+    impl ObjectImpl for ComposeObject {}
+}
+
+glib::wrapper! {
+    pub struct ComposeObject(ObjectSubclass<compose_imp::ComposeObject>);
+}
+
+impl ComposeObject {
+    pub fn new(project: &ComposeProject) -> Self {
+        let object: Self = glib::Object::new();
+        object.set(project);
+        object
+    }
+
+    pub fn set(&self, project: &ComposeProject) {
+        let imp = self.imp();
+        imp.name.replace(project.name.clone());
+        imp.services.set(project.service_count());
+        imp.state.replace(state_text(project.state()).to_string());
+        imp.working_dir.replace(project.working_dir.clone());
+    }
+
+    pub fn name(&self) -> String {
+        self.imp().name.borrow().clone()
+    }
+
+    pub fn services(&self) -> String {
+        let count = self.imp().services.get();
+        format!("{count} service{}", if count == 1 { "" } else { "s" })
+    }
+
+    pub fn state(&self) -> String {
+        self.imp().state.borrow().clone()
+    }
+
+    pub fn working_dir(&self) -> String {
+        self.imp().working_dir.borrow().clone()
+    }
+}
+
+fn state_text(state: ProjectState) -> &'static str {
+    match state {
+        ProjectState::Running => "Running",
+        ProjectState::Partial => "Partial",
+        ProjectState::Stopped => "Stopped",
     }
 }

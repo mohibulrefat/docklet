@@ -10,6 +10,7 @@ use gtk::{
     StackSwitcher,
 };
 
+use super::compose::ComposePage;
 use super::containers::ContainersPage;
 use super::images::ImagesPage;
 use super::networks::NetworksPage;
@@ -23,6 +24,7 @@ const DEFAULT_HEIGHT: i32 = 600;
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
     let containers = ContainersPage::new();
+    let compose = ComposePage::new();
     let images = ImagesPage::new();
     let volumes = VolumesPage::new();
     let networks = NetworksPage::new();
@@ -32,6 +34,7 @@ pub fn build(app: &Application) -> ApplicationWindow {
     stack.add_titled(images.widget(), Some("images"), "Images");
     stack.add_titled(volumes.widget(), Some("volumes"), "Volumes");
     stack.add_titled(networks.widget(), Some("networks"), "Networks");
+    stack.add_titled(compose.widget(), Some("compose"), "Compose");
 
     let refresh = Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Refresh"));
@@ -40,12 +43,14 @@ pub fn build(app: &Application) -> ApplicationWindow {
         let images = images.clone();
         let volumes = volumes.clone();
         let networks = networks.clone();
+        let compose = compose.clone();
         let stack = stack.clone();
         // Refresh whichever page is showing.
         move |_| match stack.visible_child_name().as_deref() {
             Some("images") => images.refresh(),
             Some("volumes") => volumes.refresh(),
             Some("networks") => networks.refresh(),
+            Some("compose") => compose.refresh(),
             _ => containers.refresh(),
         }
     });
