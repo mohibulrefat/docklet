@@ -91,6 +91,25 @@ impl StatsSample {
     }
 }
 
+impl MemoryStats {
+    /// Memory actually in use, the way `docker stats` reports it.
+    ///
+    /// The raw `usage` figure includes the kernel's page cache, which is
+    /// reclaimable and not what a user means by "how much memory is this
+    /// container using". Subtracting it is what `docker stats` itself does.
+    /// cgroup v2 calls it `inactive_file`; v1 called it `cache` — both are
+    /// tried, in that order, so the numbers agree on either cgroup version.
+    pub fn working_set(&self) -> u64 {
+        let cache = self
+            .stats
+            .get("inactive_file")
+            .or_else(|| self.stats.get("cache"))
+            .copied()
+            .unwrap_or(0);
+        self.usage.saturating_sub(cache)
+    }
+}
+
 /// What a stats stream delivers.
 pub enum StatsEvent {
     Sample(StatsSample),
@@ -170,6 +189,28 @@ mod tests {
         let sample: StatsSample = serde_json::from_str(FIRST_SAMPLE).unwrap();
         assert_eq!(sample.precpu_stats.system_cpu_usage, None);
         assert_eq!(sample.cpu_stats.system_cpu_usage, Some(224315250000000));
+    }
+
+    #[test]
+    fn subtracts_reclaimable_cache_from_memory_usage() {
+        let sample: StatsSample = serde_json::from_str(SAMPLE).unwrap();
+        // usage 2211840, inactive_file 102400 (cgroup v2 key)
+        assert_eq!(sample.memory_stats.working_set(), 2211840 - 102400);
+    }
+
+    #[test]
+    fn falls_back_to_the_cgroup_v1_cache_key() {
+        let stats: MemoryStats =
+            serde_json::from_str(r#"{"usage": 5000, "limit": 10000, "stats": {"cache": 1000}}"#)
+                .unwrap();
+        assert_eq!(stats.working_set(), 4000);
+    }
+
+    #[test]
+    fn uses_raw_usage_when_no_cache_figure_is_reported() {
+        let stats: MemoryStats =
+            serde_json::from_str(r#"{"usage": 5000, "limit": 10000, "stats": {}}"#).unwrap();
+        assert_eq!(stats.working_set(), 5000);
     }
 
     #[test]

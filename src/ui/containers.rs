@@ -257,7 +257,11 @@ impl ContainersPage {
                 };
                 match event {
                     StatsEvent::Sample(sample) => {
-                        page.detail.set_stats(sample.cpu_percent());
+                        page.detail.set_stats(
+                            sample.cpu_percent(),
+                            sample.memory_stats.working_set(),
+                            sample.memory_stats.limit,
+                        );
                     }
                     StatsEvent::Failed(_) => {
                         // The container likely stopped; that ends the stream
