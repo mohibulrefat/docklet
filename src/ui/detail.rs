@@ -1,17 +1,11 @@
 //! The container detail pane.
 
 use gtk::prelude::*;
-use gtk::{
-    Align, Box as GtkBox, Button, Grid, Label, Orientation, PolicyType, ScrolledWindow, Separator,
-    TextView, ToggleButton, Widget,
-};
+use gtk::{Align, Box as GtkBox, Button, Grid, Label, Orientation, Separator, Widget};
 
+use super::logpane::LogPane;
 use super::object::ContainerObject;
 use crate::docker::Inspect;
-
-/// How many log lines to keep in view. Bounded so following a chatty
-/// container cannot grow the buffer without limit.
-const MAX_LOG_LINES: i32 = 2000;
 
 /// A read-only view of one container.
 pub struct DetailView {
@@ -28,10 +22,10 @@ pub struct DetailView {
     restart: Label,
     networks: Label,
     mounts: Label,
-    logs: TextView,
-    logs_scroll: ScrolledWindow,
-    logs_refresh: Button,
-    follow: ToggleButton,
+    logs: LogPane,
+    cpu: Label,
+    memory: Label,
+    network: Label,
 }
 
 impl DetailView {
@@ -67,61 +61,23 @@ impl DetailView {
         let image = field(&grid, 2, "Image", false);
         let state = field(&grid, 3, "State", false);
         let status = field(&grid, 4, "Status", false);
-        let created = field(&grid, 5, "Created", false);
-        let command = field(&grid, 6, "Command", true);
-        let restart = field(&grid, 7, "Restart", false);
-        let networks = field(&grid, 8, "Networks", false);
-        let mounts = field(&grid, 9, "Mounts", false);
+        let cpu = field(&grid, 5, "CPU", false);
+        let memory = field(&grid, 6, "Memory", false);
+        let network = field(&grid, 7, "Network", false);
+        let created = field(&grid, 8, "Created", false);
+        let command = field(&grid, 9, "Command", true);
+        let restart = field(&grid, 10, "Restart", false);
+        let networks = field(&grid, 11, "Networks", false);
+        let mounts = field(&grid, 12, "Mounts", false);
 
-        let logs = TextView::builder()
-            .editable(false)
-            .cursor_visible(false)
-            .monospace(true)
-            .left_margin(6)
-            .right_margin(6)
-            .top_margin(6)
-            .bottom_margin(6)
-            .build();
-
-        let logs_scroll = ScrolledWindow::builder()
-            .hscrollbar_policy(PolicyType::Automatic)
-            .vexpand(true)
-            .child(&logs)
-            .build();
-
-        let logs_title = Label::builder()
-            .label("Logs")
-            .halign(Align::Start)
-            .hexpand(true)
-            .build();
-        logs_title.add_css_class("heading");
-
-        let logs_refresh = Button::from_icon_name("view-refresh-symbolic");
-        logs_refresh.set_tooltip_text(Some("Refresh logs"));
-        logs_refresh.add_css_class("flat");
-
-        let logs_header = GtkBox::builder()
-            .orientation(Orientation::Horizontal)
-            .spacing(6)
-            .margin_start(12)
-            .margin_end(6)
-            .margin_top(6)
-            .margin_bottom(6)
-            .build();
-        let follow = ToggleButton::builder().label("Follow").build();
-        follow.set_tooltip_text(Some("Stream new log output as it arrives"));
-
-        logs_header.append(&logs_title);
-        logs_header.append(&follow);
-        logs_header.append(&logs_refresh);
+        let logs = LogPane::new();
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(&header);
         root.append(&Separator::new(Orientation::Horizontal));
         root.append(&grid);
         root.append(&Separator::new(Orientation::Horizontal));
-        root.append(&logs_header);
-        root.append(&logs_scroll);
+        root.append(logs.widget());
         root.set_visible(false);
 
         DetailView {
@@ -139,9 +95,9 @@ impl DetailView {
             networks,
             mounts,
             logs,
-            logs_scroll,
-            logs_refresh,
-            follow,
+            cpu,
+            memory,
+            network,
         }
     }
 
@@ -154,48 +110,22 @@ impl DetailView {
     }
 
     pub fn connect_logs_refresh(&self, handler: impl Fn() + 'static) {
-        self.logs_refresh.connect_clicked(move |_| handler());
+        self.logs.connect_refresh(handler);
     }
 
     /// Called with the new state whenever Follow is toggled.
     pub fn connect_follow(&self, handler: impl Fn(bool) + 'static) {
-        self.follow
-            .connect_toggled(move |button| handler(button.is_active()));
+        self.logs.connect_follow(handler);
     }
 
     /// Turn Follow off without firing the handler's side effects twice.
     pub fn set_following(&self, following: bool) {
-        if self.follow.is_active() != following {
-            self.follow.set_active(following);
-        }
+        self.logs.set_following(following);
     }
 
-    /// Append streamed output, trimming the buffer and scrolling to the end.
+    /// Append streamed output.
     pub fn append_logs(&self, text: &str) {
-        let buffer = self.logs.buffer();
-        buffer.insert(&mut buffer.end_iter(), text);
-        self.trim_logs();
-        self.scroll_to_end();
-    }
-
-    /// Keep only the most recent lines, so a chatty container cannot grow the
-    /// buffer without bound while it is being followed.
-    fn trim_logs(&self) {
-        let buffer = self.logs.buffer();
-        let excess = buffer.line_count() - MAX_LOG_LINES;
-        if excess <= 0 {
-            return;
-        }
-        let start = buffer.start_iter();
-        let Some(cut) = buffer.iter_at_line(excess) else {
-            return;
-        };
-        buffer.delete(&mut start.clone(), &mut cut.clone());
-    }
-
-    fn scroll_to_end(&self) {
-        let adjustment = self.logs_scroll.vadjustment();
-        adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        self.logs.append_logs(text);
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -220,15 +150,59 @@ impl DetailView {
             &self.restart,
             &self.networks,
             &self.mounts,
+            &self.cpu,
+            &self.memory,
+            &self.network,
         ] {
             label.set_text("");
         }
         self.set_logs("");
     }
 
+    /// Update the live CPU and memory readings. Called for each sample while
+    /// stats are running; does nothing to the rest of the pane.
+    pub fn set_stats(&self, cpu_percent: Option<f64>, memory_usage: u64, memory_limit: u64) {
+        self.cpu.set_text(&match cpu_percent {
+            Some(percent) => format!("{percent:.1}%"),
+            // A real "no data yet", not a fabricated 0%.
+            None => "—".to_string(),
+        });
+
+        self.memory.set_text(&if memory_limit > 0 {
+            format!(
+                "{} / {}",
+                crate::docker::human_size(memory_usage),
+                crate::docker::human_size(memory_limit)
+            )
+        } else {
+            crate::docker::human_size(memory_usage)
+        });
+    }
+
+    /// Show the current network transfer rate, or a placeholder before the
+    /// second sample makes a rate computable.
+    pub fn set_network_rate(&self, rate: Option<(f64, f64)>) {
+        self.network.set_text(&match rate {
+            Some((rx, tx)) => format!(
+                "\u{2193} {}/s   \u{2191} {}/s",
+                crate::docker::human_size(rx as u64),
+                crate::docker::human_size(tx as u64)
+            ),
+            None => "—".to_string(),
+        });
+    }
+
+    /// Stats stopped or never started for this container; show nothing rather
+    /// than a stale reading from whatever was open before.
+    pub fn clear_stats(&self) {
+        self.cpu.set_text("");
+        self.memory.set_text("");
+        self.network.set_text("");
+    }
+
     /// Replace the log view's contents.
     pub fn set_logs(&self, text: &str) {
-        self.logs.buffer().set_text(text);
+        self.logs.set_logs(text);
     }
 
     /// Fill in the fields that only a full inspect provides.

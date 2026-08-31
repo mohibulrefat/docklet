@@ -15,15 +15,11 @@ use gtk::{
 use super::banner::Banner;
 use super::detail::DetailView;
 use super::dialog::confirm;
-use super::list::{self, mono_column, text_column};
+use super::list::{self, mono_column, text_column, Loading};
 use super::object::ContainerObject;
-use crate::docker::{Docker, DockerError, LogEvent, StreamHandle};
+use crate::docker::{Docker, DockerError, LogEvent, StatsEvent, StreamHandle};
 
 const LOG_DOMAIN: &str = "docklet";
-
-/// How many log lines to fetch. Bounded so a chatty container cannot fill
-/// memory just by being opened.
-const LOG_TAIL: usize = 500;
 
 /// Colours for the state bullet. `alpha(currentColor, …)` follows the theme,
 /// so the stopped bullet stays legible in both light and dark.
@@ -50,6 +46,7 @@ pub struct ContainersPage {
     empty: Label,
     store: gio::ListStore,
     selection: SingleSelection,
+    loading: Loading,
     /// The action bar; made insensitive while an action runs.
     actions: GtkBox,
     detail: DetailView,
@@ -66,6 +63,10 @@ pub struct ContainersPage {
     /// The live log stream, if Follow is on. Dropping it stops the worker,
     /// so replacing or clearing this is what tears the stream down.
     follow: RefCell<Option<StreamHandle>>,
+    /// The stats stream for the open detail pane. Exactly one at a time,
+    /// structurally: opening a detail pane replaces this, and closing one
+    /// clears it — there is no path that leaves two running.
+    stats: RefCell<Option<StreamHandle>>,
 }
 
 impl ContainersPage {
@@ -120,9 +121,15 @@ impl ContainersPage {
 
         let detail = DetailView::new();
 
+        let loading = Loading::new();
+        loading.widget().set_halign(gtk::Align::Center);
+        loading.widget().set_valign(gtk::Align::Center);
+        loading.widget().set_vexpand(true);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
         root.append(&actions);
+        root.append(loading.widget());
         root.append(&scrolled);
         root.append(&empty);
         root.append(detail.widget());
@@ -133,6 +140,7 @@ impl ContainersPage {
             empty,
             store,
             selection,
+            loading,
             actions: actions.clone(),
             detail,
             banner,
@@ -141,6 +149,7 @@ impl ContainersPage {
             busy: Rc::new(Cell::new(false)),
             open_container: RefCell::new(None),
             follow: RefCell::new(None),
+            stats: RefCell::new(None),
         });
 
         actions.append(&page.action_button("Start", Docker::start_container));
@@ -228,6 +237,81 @@ impl ContainersPage {
         self.detail.set_visible(true);
 
         self.load_inspect(&row.id());
+        self.start_stats(&row.id());
+    }
+
+    /// Begin streaming CPU and memory for the open container.
+    ///
+    /// One stream only, for whichever container is currently open; replacing
+    /// `self.stats` drops and stops any previous one.
+    fn start_stats(self: &Rc<Self>, id: &str) {
+        let (sender, receiver) = async_channel::bounded::<StatsEvent>(16);
+
+        let handle = match Docker::connect() {
+            Ok(docker) => docker.follow_stats(id, sender),
+            Err(_) => return, // Already reported by the status footer.
+        };
+        self.stats.replace(Some(handle));
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            // The previous sample's network totals and timestamp, for turning
+            // cumulative counters into a rate. `None` until a second sample
+            // arrives, which is also why the first reading shows "—".
+            let mut previous: Option<(f64, u64, u64)> = None;
+
+            // Docker does not close this stream when a container merely
+            // stops — verified directly against the daemon, and it matches
+            // `docker stats` itself: the numbers just settle at zero, which
+            // the per-sample update below already renders correctly with no
+            // special case needed. The stream *does* end — via a clean EOF,
+            // not an error — when the container is removed, which is what
+            // the loop exiting without a `Failed` event below is for.
+            while let Ok(event) = receiver.recv().await {
+                let Some(page) = page.upgrade() else {
+                    return;
+                };
+                match event {
+                    StatsEvent::Sample(sample) => {
+                        page.detail.set_stats(
+                            sample.cpu_percent(),
+                            sample.memory_stats.working_set(),
+                            sample.memory_stats.limit,
+                        );
+
+                        let (rx, tx) = sample.network_totals();
+                        let rate = match (previous, sample.read_seconds()) {
+                            (Some((prev_t, prev_rx, prev_tx)), Some(now_t)) if now_t > prev_t => {
+                                let elapsed = now_t - prev_t;
+                                Some((
+                                    (rx.saturating_sub(prev_rx)) as f64 / elapsed,
+                                    (tx.saturating_sub(prev_tx)) as f64 / elapsed,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        page.detail.set_network_rate(rate);
+
+                        if let Some(now_t) = sample.read_seconds() {
+                            previous = Some((now_t, rx, tx));
+                        }
+                    }
+                    StatsEvent::Failed(message) => {
+                        glib::g_warning!(LOG_DOMAIN, "stats stream failed: {message}");
+                        page.detail.clear_stats();
+                        return;
+                    }
+                }
+            }
+
+            // The channel closed with no `Failed` event: a clean EOF, which
+            // is what a removed container looks like. Blanking the fields
+            // here is what stops them from showing a frozen last reading for
+            // a container that no longer exists.
+            if let Some(page) = page.upgrade() {
+                page.detail.clear_stats();
+            }
+        });
     }
 
     /// Fetch the fields only a full inspect provides.
@@ -264,9 +348,10 @@ impl ContainersPage {
         let page = Rc::downgrade(self);
 
         glib::spawn_future_local(async move {
-            let fetched =
-                gio::spawn_blocking(move || Docker::connect()?.container_logs(&id, tty, LOG_TAIL))
-                    .await;
+            let fetched = gio::spawn_blocking(move || {
+                Docker::connect()?.container_logs(&id, tty, crate::docker::DEFAULT_LOG_TAIL)
+            })
+            .await;
 
             let Some(page) = page.upgrade() else {
                 return;
@@ -302,7 +387,7 @@ impl ContainersPage {
         let (sender, receiver) = async_channel::bounded::<LogEvent>(64);
 
         let handle = match Docker::connect() {
-            Ok(docker) => docker.follow_logs(&id, tty, LOG_TAIL, sender),
+            Ok(docker) => docker.follow_logs(&id, tty, crate::docker::DEFAULT_LOG_TAIL, sender),
             Err(e) => {
                 self.show_error(&format!("Could not follow logs. {e}"));
                 self.detail.set_following(false);
@@ -344,6 +429,10 @@ impl ContainersPage {
     fn close_detail(self: &Rc<Self>) {
         self.stop_follow();
         self.detail.set_following(false);
+        // Dropping the handle stops the worker; nothing keeps sampling once
+        // the pane that showed the numbers is gone.
+        self.stats.replace(None);
+        self.detail.clear_stats();
         self.open_container.replace(None);
         self.detail.set_visible(false);
         self.actions.set_visible(true);
@@ -490,6 +579,11 @@ impl ContainersPage {
             let verb = label.to_lowercase();
             match outcome {
                 Ok(Ok(())) => page.refresh(),
+                // A container removed by something else between the list
+                // loading and the action running is not a failure the user
+                // needs to see a banner about: refreshing shows the row gone,
+                // which already says what happened.
+                Ok(Err(DockerError::Api { status: 404, .. })) => page.refresh(),
                 Ok(Err(e)) => page.show_error(&format!("Could not {verb} {name}. {e}")),
                 Err(_) => page.show_error(&format!("Could not {verb} {name}.")),
             }
@@ -514,12 +608,19 @@ impl ContainersPage {
         }
 
         let page = Rc::downgrade(self);
+        let showing_first_load = self.loading.start();
+        if showing_first_load {
+            self.scrolled.set_visible(false);
+            self.empty.set_visible(false);
+        }
+
         glib::spawn_future_local(async move {
             let listed = gio::spawn_blocking(|| Docker::connect()?.containers(true)).await;
 
             let Some(page) = page.upgrade() else {
                 return;
             };
+            page.loading.finish();
 
             match listed {
                 Ok(Ok(containers)) => {

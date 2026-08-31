@@ -5,12 +5,14 @@
 //! bytes into typed values. Nothing in here imports GTK, which is what keeps it
 //! testable without a UI — or a daemon.
 
+mod compose;
 mod containers;
 mod endpoint;
 mod http;
 mod images;
 mod logs;
 mod networks;
+mod stats;
 mod stream;
 mod transport;
 mod volumes;
@@ -19,11 +21,13 @@ use std::fmt;
 
 use serde::Deserialize;
 
+pub use compose::{ComposeProject, ProjectActionResult, ProjectState};
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
-pub use images::{now_seconds, Image, ImageInspect, PullEvent};
-pub use logs::LogEvent;
+pub use images::{human_size, now_seconds, Image, ImageInspect, PullEvent};
+pub use logs::{LogEvent, DEFAULT_LOG_TAIL};
 pub use networks::Network;
+pub use stats::StatsEvent;
 pub use stream::StreamHandle;
 pub use volumes::Volume;
 

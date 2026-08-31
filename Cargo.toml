@@ -10,3 +10,18 @@ gtk = { package = "gtk4", version = "0.11.4", features = ["v4_10"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-channel = "2.5"
+
+[profile.release]
+# Small and fast to load over feature-complete: this is a small utility, not
+# a program where every millisecond of compute matters.
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+# panic = "abort" is deliberately NOT set here. gio::spawn_blocking (every
+# Docker call in this app runs through it) recovers from a panicking worker
+# via std::panic::catch_unwind and turns it into an Err the UI already
+# handles — see the "worker panicked" branches throughout src/ui/. Abort
+# disables unwinding process-wide, which would turn every one of those
+# recoverable failures into a hard crash instead. Unwinding costs a small
+# amount of binary size; that trade is the right one for a GUI app.

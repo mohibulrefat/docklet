@@ -4,11 +4,13 @@
 //! HTTP. It calls typed functions on `docker` and renders what comes back.
 
 mod banner;
+mod compose;
 mod containers;
 mod detail;
 mod dialog;
 mod images;
 mod list;
+mod logpane;
 mod networks;
 mod object;
 mod volumes;
