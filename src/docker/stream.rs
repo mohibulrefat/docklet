@@ -47,11 +47,12 @@ impl Drop for StreamHandle {
 }
 
 impl Docker {
-    /// Stream a GET, handing each piece of body to `on_data` on a worker thread.
+    /// Stream a request, handing each piece of body to `on_event` on a worker
+    /// thread.
     ///
-    /// `on_data` returns false to stop. It is called off the main thread, so it
-    /// must not touch widgets — send the data somewhere instead.
-    pub fn stream<F>(&self, path: &str, mut on_event: F) -> StreamHandle
+    /// `on_event` returns false to stop. It is called off the main thread, so
+    /// it must not touch widgets — send the data somewhere instead.
+    pub fn stream<F>(&self, method: &str, path: &str, mut on_event: F) -> StreamHandle
     where
         F: FnMut(StreamEvent) -> bool + Send + 'static,
     {
@@ -64,10 +65,11 @@ impl Docker {
         };
 
         let endpoint = self.endpoint.clone();
+        let method = method.to_string();
         let path = path.to_string();
 
         thread::spawn(move || {
-            let mut body = match open(&endpoint, &path, &connection) {
+            let mut body = match open(&endpoint, &method, &path, &connection) {
                 Ok(body) => body,
                 Err(e) => {
                     on_event(StreamEvent::Failed(e));
@@ -103,6 +105,7 @@ impl Docker {
 /// Connect, publish a shutdown handle, and read past the response head.
 fn open(
     endpoint: &super::Endpoint,
+    method: &str,
     path: &str,
     connection: &Arc<Mutex<Option<Connection>>>,
 ) -> Result<http::Streaming, DockerError> {
@@ -116,7 +119,7 @@ fn open(
         *slot = Some(socket.try_clone()?);
     }
 
-    let (status, mut body) = http::open_stream(socket, "GET", path)?;
+    let (status, mut body) = http::open_stream(socket, method, path)?;
     if status >= 400 {
         // The failure body carries Docker's own message; read it rather than
         // showing the user a URL.

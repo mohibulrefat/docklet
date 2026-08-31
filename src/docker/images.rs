@@ -2,7 +2,10 @@
 
 use serde::Deserialize;
 
+use async_channel::Sender;
+
 use super::containers::null_as_default;
+use super::stream::{StreamEvent, StreamHandle};
 use super::{Docker, DockerError};
 
 /// What Docker calls an untagged repository or tag.
@@ -133,7 +136,130 @@ pub fn now_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// What a pull reports as it runs.
+#[derive(Debug, PartialEq)]
+pub enum PullEvent {
+    /// A human-readable step, with the current layer's progress if known.
+    Progress {
+        message: String,
+        fraction: Option<f64>,
+    },
+    /// The pull failed. Docker reports these *inside* a 200 response.
+    Failed(String),
+}
+
+/// One line of Docker's pull stream.
+#[derive(Deserialize)]
+struct PullLine {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    /// Present only on failure — and the HTTP status is still 200.
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(rename = "progressDetail", default)]
+    progress: Option<ProgressDetail>,
+}
+
+#[derive(Deserialize)]
+struct ProgressDetail {
+    #[serde(default)]
+    current: Option<u64>,
+    #[serde(default)]
+    total: Option<u64>,
+}
+
+/// Turns the pull stream's newline-delimited JSON into events.
+///
+/// Lines can be split across reads, so partial input is buffered rather than
+/// dropped.
+#[derive(Default)]
+pub struct PullDecoder {
+    buffer: String,
+}
+
+impl PullDecoder {
+    /// Feed raw bytes, returning whatever complete lines they yielded.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<PullEvent> {
+        self.buffer.push_str(&String::from_utf8_lossy(bytes));
+
+        let mut events = Vec::new();
+        while let Some(newline) = self.buffer.find('\n') {
+            let line: String = self.buffer.drain(..=newline).collect();
+            if let Some(event) = parse_pull_line(line.trim()) {
+                events.push(event);
+            }
+        }
+        events
+    }
+}
+
+/// Interpret one JSON line of the pull stream.
+fn parse_pull_line(line: &str) -> Option<PullEvent> {
+    if line.is_empty() {
+        return None;
+    }
+
+    // A line we cannot parse is not worth failing a pull over.
+    let parsed: PullLine = serde_json::from_str(line).ok()?;
+
+    if let Some(error) = parsed.error {
+        return Some(PullEvent::Failed(error));
+    }
+
+    let status = parsed.status?;
+    let message = match parsed.id {
+        Some(id) if !id.is_empty() => format!("{status} {id}"),
+        _ => status,
+    };
+
+    let fraction = parsed.progress.and_then(|p| match (p.current, p.total) {
+        (Some(current), Some(total)) if total > 0 => Some((current as f64 / total as f64).min(1.0)),
+        _ => None,
+    });
+
+    Some(PullEvent::Progress { message, fraction })
+}
+
+/// Split a pull reference into the name and tag Docker's API wants.
+///
+/// An unqualified reference means `latest`, as it does everywhere else.
+fn split_for_pull(reference: &str) -> (&str, &str) {
+    match split_reference(reference) {
+        (name, tag) if tag != NONE => (name, tag),
+        _ => (reference, "latest"),
+    }
+}
+
 impl Docker {
+    /// Pull an image, reporting progress until it finishes or fails.
+    ///
+    /// The stream ends by closing the channel; a `Failed` event arriving first
+    /// is the only way to know a pull did not succeed, because Docker answers
+    /// `200 OK` even when it is about to fail.
+    pub fn pull_image(&self, reference: &str, sender: Sender<PullEvent>) -> StreamHandle {
+        let (name, tag) = split_for_pull(reference.trim());
+        let path = format!("/images/create?fromImage={name}&tag={tag}");
+        let mut decoder = PullDecoder::default();
+
+        self.stream("POST", &path, move |event| match event {
+            StreamEvent::Data(data) => {
+                for event in decoder.feed(data) {
+                    let failed = matches!(event, PullEvent::Failed(_));
+                    if sender.send_blocking(event).is_err() || failed {
+                        return false;
+                    }
+                }
+                true
+            }
+            StreamEvent::Failed(e) => {
+                let _ = sender.send_blocking(PullEvent::Failed(e.to_string()));
+                false
+            }
+        })
+    }
+
     /// List images, including untagged ones.
     pub fn images(&self) -> Result<Vec<Image>, DockerError> {
         self.get_json("/images/json?all=0")
@@ -241,6 +367,89 @@ mod tests {
         assert_eq!(relative_age(now - 120, now), "2 minutes ago");
         assert_eq!(relative_age(now - 2 * 30 * 86400, now), "2 months ago");
         assert_eq!(relative_age(now - 400 * 86400, now), "1 year ago");
+    }
+
+    #[test]
+    fn defaults_an_untagged_pull_to_latest() {
+        assert_eq!(split_for_pull("alpine"), ("alpine", "latest"));
+        assert_eq!(split_for_pull("alpine:3.19"), ("alpine", "3.19"));
+        assert_eq!(split_for_pull("minio/minio"), ("minio/minio", "latest"));
+        assert_eq!(
+            split_for_pull("localhost:5000/app"),
+            ("localhost:5000/app", "latest")
+        );
+    }
+
+    #[test]
+    fn reports_pull_progress() {
+        let mut decoder = PullDecoder::default();
+        let events = decoder.feed(
+            br#"{"status":"Pulling fs layer","progressDetail":{},"id":"17a39c0ba978"}
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![PullEvent::Progress {
+                message: "Pulling fs layer 17a39c0ba978".to_string(),
+                fraction: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn computes_a_fraction_when_docker_gives_counts() {
+        let mut decoder = PullDecoder::default();
+        let events = decoder.feed(
+            br#"{"status":"Downloading","progressDetail":{"current":50,"total":200},"id":"abc"}
+"#,
+        );
+        match &events[0] {
+            PullEvent::Progress { fraction, .. } => assert_eq!(*fraction, Some(0.25)),
+            other => panic!("expected progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detects_a_failure_carried_inside_a_successful_response() {
+        // Docker answers 200 and then reports the failure in the body; missing
+        // this would leave a failed pull looking like it worked.
+        let mut decoder = PullDecoder::default();
+        let events = decoder.feed(
+            br#"{"errorDetail":{"message":"manifest unknown"},"error":"manifest unknown"}
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![PullEvent::Failed("manifest unknown".to_string())]
+        );
+    }
+
+    #[test]
+    fn buffers_a_line_split_across_reads() {
+        let mut decoder = PullDecoder::default();
+        assert!(decoder.feed(br#"{"status":"Down"#).is_empty());
+        let events = decoder.feed(b"loading\"}\n");
+        assert_eq!(
+            events,
+            vec![PullEvent::Progress {
+                message: "Downloading".to_string(),
+                fraction: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn reads_several_lines_from_one_read() {
+        let mut decoder = PullDecoder::default();
+        let events = decoder.feed(b"{\"status\":\"one\"}\n{\"status\":\"two\"}\n");
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn ignores_blank_and_unparseable_lines() {
+        let mut decoder = PullDecoder::default();
+        assert!(decoder.feed(b"\n\r\n").is_empty());
+        assert!(decoder.feed(b"not json\n").is_empty());
     }
 
     #[test]

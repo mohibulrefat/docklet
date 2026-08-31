@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
-pub use images::{now_seconds, Image};
+pub use images::{now_seconds, Image, PullEvent};
 pub use logs::LogEvent;
 pub use stream::StreamHandle;
 

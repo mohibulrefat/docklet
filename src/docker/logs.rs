@@ -91,7 +91,7 @@ impl Docker {
         let mut decoder = LogDecoder::new(tty);
         let path = format!("/containers/{id}/logs?stdout=1&stderr=1&tail={tail}&follow=1");
 
-        self.stream(&path, move |event| match event {
+        self.stream("GET", &path, move |event| match event {
             StreamEvent::Data(data) => {
                 let text = decoder.feed(data);
                 if text.is_empty() {
