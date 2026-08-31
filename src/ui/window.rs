@@ -12,6 +12,7 @@ use gtk::{
 
 use super::containers::ContainersPage;
 use super::images::ImagesPage;
+use super::volumes::VolumesPage;
 use crate::docker::Docker;
 
 const LOG_DOMAIN: &str = "docklet";
@@ -22,11 +23,12 @@ const DEFAULT_HEIGHT: i32 = 600;
 pub fn build(app: &Application) -> ApplicationWindow {
     let containers = ContainersPage::new();
     let images = ImagesPage::new();
+    let volumes = VolumesPage::new();
 
     let stack = Stack::builder().vexpand(true).build();
     stack.add_titled(containers.widget(), Some("containers"), "Containers");
     stack.add_titled(images.widget(), Some("images"), "Images");
-    stack.add_titled(&placeholder("Volumes"), Some("volumes"), "Volumes");
+    stack.add_titled(volumes.widget(), Some("volumes"), "Volumes");
     stack.add_titled(&placeholder("Networks"), Some("networks"), "Networks");
 
     let refresh = Button::from_icon_name("view-refresh-symbolic");
@@ -34,10 +36,12 @@ pub fn build(app: &Application) -> ApplicationWindow {
     refresh.connect_clicked({
         let containers = containers.clone();
         let images = images.clone();
+        let volumes = volumes.clone();
         let stack = stack.clone();
         // Refresh whichever page is showing.
         move |_| match stack.visible_child_name().as_deref() {
             Some("images") => images.refresh(),
+            Some("volumes") => volumes.refresh(),
             _ => containers.refresh(),
         }
     });

@@ -10,6 +10,7 @@ mod dialog;
 mod images;
 mod list;
 mod object;
+mod volumes;
 mod window;
 
 pub use window::build;

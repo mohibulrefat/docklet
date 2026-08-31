@@ -10,7 +10,7 @@ use gtk::glib;
 use gtk::subclass::prelude::*;
 
 use super::list::Row;
-use crate::docker::{Container, Image};
+use crate::docker::{Container, Image, Volume};
 
 mod imp {
     use super::*;
@@ -185,5 +185,55 @@ impl ImageObject {
 
     pub fn created(&self) -> String {
         self.imp().created.borrow().clone()
+    }
+}
+
+mod volume_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct VolumeObject {
+        pub name: RefCell<String>,
+        pub driver: RefCell<String>,
+        pub mountpoint: RefCell<String>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for VolumeObject {
+        const NAME: &'static str = "DockletVolumeObject";
+        type Type = super::VolumeObject;
+    }
+
+    impl ObjectImpl for VolumeObject {}
+}
+
+glib::wrapper! {
+    pub struct VolumeObject(ObjectSubclass<volume_imp::VolumeObject>);
+}
+
+impl VolumeObject {
+    pub fn new(volume: &Volume) -> Self {
+        let object: Self = glib::Object::new();
+        object.set(volume);
+        object
+    }
+
+    pub fn set(&self, volume: &Volume) {
+        let imp = self.imp();
+        imp.name.replace(volume.name.clone());
+        imp.driver.replace(volume.driver.clone());
+        imp.mountpoint.replace(volume.mountpoint.clone());
+    }
+
+    pub fn name(&self) -> String {
+        self.imp().name.borrow().clone()
+    }
+
+    pub fn driver(&self) -> String {
+        self.imp().driver.borrow().clone()
+    }
+
+    pub fn mountpoint(&self) -> String {
+        self.imp().mountpoint.borrow().clone()
     }
 }
