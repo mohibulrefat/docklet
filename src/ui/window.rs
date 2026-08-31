@@ -4,10 +4,13 @@
 //! implements it.
 
 use gtk::prelude::*;
+use gtk::{gio, glib};
 use gtk::{
     Align, Application, ApplicationWindow, HeaderBar, Label, Orientation, Separator, Stack,
     StackSwitcher,
 };
+
+use crate::docker::Docker;
 
 const DEFAULT_WIDTH: i32 = 900;
 const DEFAULT_HEIGHT: i32 = 600;
@@ -23,10 +26,13 @@ pub fn build(app: &Application) -> ApplicationWindow {
     let header = HeaderBar::new();
     header.set_title_widget(Some(&StackSwitcher::builder().stack(&stack).build()));
 
+    let status = status_bar();
+    check_docker(&status);
+
     let content = gtk::Box::new(Orientation::Vertical, 0);
     content.append(&stack);
     content.append(&Separator::new(Orientation::Horizontal));
-    content.append(&status_bar());
+    content.append(&status);
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -47,9 +53,52 @@ fn placeholder(name: &str) -> Label {
     label
 }
 
+/// Report Docker's status in the footer.
+///
+/// The check runs on a worker thread so the window opens immediately: a daemon
+/// that is down takes as long to discover as one that is up, and neither should
+/// delay the first frame.
+fn check_docker(status: &Label) {
+    status.set_text("Checking Docker…");
+
+    let status = status.clone();
+    glib::spawn_future_local(async move {
+        match gio::spawn_blocking(docker_status).await {
+            Ok(text) => status.set_text(&text),
+            // Only reachable if the worker panicked.
+            Err(_) => status.set_text("Could not check Docker."),
+        }
+    });
+}
+
+/// Ask Docker who it is. Runs on a worker thread; returns text to display.
+///
+/// The message is built here rather than in the widget code so the UI never has
+/// to interpret a `DockerError` — or know that endpoints exist.
+fn docker_status() -> String {
+    match connect_and_describe() {
+        Ok(description) => {
+            tracing::info!("connected to {description}");
+            description
+        }
+        Err(e) => {
+            tracing::warn!("docker unavailable: {e}");
+            e.to_string()
+        }
+    }
+}
+
+fn connect_and_describe() -> Result<String, crate::docker::DockerError> {
+    let docker = Docker::connect()?;
+    docker.ping()?;
+    Ok(docker.version()?.to_string())
+}
+
 /// The footer that reports Docker's status.
+///
+/// Created empty; `check_docker` sets the text before the window is shown.
 fn status_bar() -> Label {
-    let label = Label::new(Some("—"));
+    let label = Label::new(None);
     label.add_css_class("dim-label");
     label.set_halign(Align::Start);
     label.set_margin_top(4);

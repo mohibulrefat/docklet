@@ -9,7 +9,7 @@
 //!
 //! One request per connection, using `Connection: close`.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 
 use super::transport::Stream;
 use super::DockerError;
