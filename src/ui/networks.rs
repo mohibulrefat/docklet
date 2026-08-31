@@ -8,10 +8,11 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Box as GtkBox, Button, ColumnView, Entry, Label, Orientation, PolicyType, ScrolledWindow,
-    SingleSelection, Widget,
+    SingleSelection, Widget, Window,
 };
 
 use super::banner::Banner;
+use super::dialog::confirm;
 use super::list::{self, text_column, Row};
 use super::object::NetworkObject;
 use crate::docker::{Docker, Network};
@@ -56,6 +57,7 @@ pub struct NetworksPage {
     refreshing: Rc<Cell<bool>>,
     name_entry: Entry,
     driver_entry: Entry,
+    remove_button: Button,
 }
 
 impl NetworksPage {
@@ -97,6 +99,10 @@ impl NetworksPage {
         let create_button = Button::with_label("Create");
         create_button.add_css_class("suggested-action");
 
+        let remove_button = Button::with_label("Remove");
+        remove_button.add_css_class("destructive-action");
+        remove_button.set_sensitive(false);
+
         let actions = GtkBox::builder()
             .orientation(Orientation::Horizontal)
             .spacing(6)
@@ -108,6 +114,7 @@ impl NetworksPage {
         actions.append(&name_entry);
         actions.append(&driver_entry);
         actions.append(&create_button);
+        actions.append(&remove_button);
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
@@ -125,6 +132,7 @@ impl NetworksPage {
             refreshing: Rc::new(Cell::new(false)),
             name_entry,
             driver_entry,
+            remove_button,
         });
 
         create_button.connect_clicked({
@@ -143,6 +151,22 @@ impl NetworksPage {
                 }
             }
         });
+        page.remove_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.remove_selected();
+                }
+            }
+        });
+        page.selection.connect_selected_item_notify({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.sync_remove();
+                }
+            }
+        });
 
         page.refresh();
         page
@@ -156,6 +180,14 @@ impl NetworksPage {
         self.selection
             .selected_item()
             .and_downcast::<NetworkObject>()
+    }
+
+    /// Removing needs a selection, and Docker's own networks cannot go.
+    fn sync_remove(&self) {
+        let removable = self
+            .selected()
+            .is_some_and(|network| !network.is_predefined());
+        self.remove_button.set_sensitive(removable);
     }
 
     fn show_error(&self, message: &str) {
@@ -195,6 +227,43 @@ impl NetworksPage {
         });
     }
 
+    /// Remove the selected network, after confirming.
+    fn remove_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        if row.is_predefined() {
+            return;
+        }
+        let (id, name) = (row.id(), row.name());
+        let parent = self.root.root().and_downcast::<Window>();
+        self.banner.clear();
+        let page = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let confirmed = confirm(
+                parent.as_ref(),
+                &format!("Remove network {name}?"),
+                "Containers still attached to it will lose this network.",
+                "Remove",
+            )
+            .await;
+            if !confirmed {
+                return;
+            }
+
+            let removed = gio::spawn_blocking(move || Docker::connect()?.remove_network(&id)).await;
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match removed {
+                Ok(Ok(())) => page.refresh(),
+                Ok(Err(e)) => page.show_error(&format!("Could not remove {name}. {e}")),
+                Err(_) => page.show_error(&format!("Could not remove {name}.")),
+            }
+        });
+    }
+
     fn sync_list_visibility(&self) {
         let is_empty = self.store.n_items() == 0;
         self.empty.set_visible(is_empty);
@@ -218,6 +287,7 @@ impl NetworksPage {
                 Ok(Ok(networks)) => {
                     list::apply::<NetworkObject>(&page.store, &networks);
                     page.sync_list_visibility();
+                    page.sync_remove();
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list networks. {e}")),
                 Err(_) => page.show_error("Could not list networks."),
