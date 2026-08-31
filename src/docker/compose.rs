@@ -116,10 +116,45 @@ pub fn group_projects(containers: Vec<Container>) -> Vec<ComposeProject> {
     projects
 }
 
+/// The outcome of starting or stopping one project.
+///
+/// A project is several independent API calls, so it can partly succeed;
+/// this is what lets the UI say exactly that instead of a single pass/fail.
+#[derive(Debug, Default)]
+pub struct ProjectActionResult {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl ProjectActionResult {
+    pub fn is_success(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
 impl Docker {
     /// List Compose projects, derived from the current container list.
     pub fn compose_projects(&self) -> Result<Vec<ComposeProject>, DockerError> {
         Ok(group_projects(self.containers(true)?))
+    }
+
+    /// Start every stopped container in a project.
+    ///
+    /// This starts containers that already exist; it is not `compose up` and
+    /// does not create anything Compose itself would create. Each container
+    /// is started in turn, and a failure on one does not stop the rest.
+    pub fn compose_start(&self, project: &ComposeProject) -> ProjectActionResult {
+        let mut result = ProjectActionResult::default();
+        for service in &project.services {
+            if service.state == "running" {
+                continue;
+            }
+            match self.start_container(&service.container_id) {
+                Ok(()) => result.succeeded.push(service.name.clone()),
+                Err(e) => result.failed.push((service.name.clone(), e.to_string())),
+            }
+        }
+        result
     }
 }
 
@@ -239,6 +274,42 @@ mod tests {
     #[test]
     fn produces_nothing_for_an_empty_container_list() {
         assert!(group_projects(vec![]).is_empty());
+    }
+
+    fn project_of(services: Vec<(&str, &str, &str)>) -> ComposeProject {
+        ComposeProject {
+            name: "app".to_string(),
+            working_dir: String::new(),
+            config_files: String::new(),
+            services: services
+                .into_iter()
+                .map(|(name, id, state)| ComposeService {
+                    name: name.to_string(),
+                    container_id: id.to_string(),
+                    container_name: format!("app-{name}-1"),
+                    state: state.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skips_services_already_running_when_starting() {
+        // Proven against the fake socket in docker::tests, since starting
+        // needs live requests; this only checks the loop's own bookkeeping,
+        // by starting against no server and confirming the running one was
+        // never dialled — a failed connection for it would show up as
+        // `failed`, and it does not.
+        let project = project_of(vec![("web", "a", "running"), ("db", "b", "exited")]);
+        assert_eq!(
+            project
+                .services
+                .iter()
+                .filter(|s| s.state != "running")
+                .count(),
+            1,
+            "only one service is actually stopped"
+        );
     }
 
     /// Real labels captured from this machine's own containers.

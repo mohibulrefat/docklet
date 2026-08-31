@@ -11,14 +11,14 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Box as GtkBox, ColumnView, Label, Orientation, PolicyType, ScrolledWindow, SingleSelection,
-    Widget,
+    Box as GtkBox, Button, ColumnView, Label, Orientation, PolicyType, ScrolledWindow,
+    SingleSelection, Widget,
 };
 
 use super::banner::Banner;
 use super::list::{self, text_column, Row};
 use super::object::ComposeObject;
-use crate::docker::{ComposeProject, Docker};
+use crate::docker::{ComposeProject, Docker, ProjectActionResult};
 
 const LOG_DOMAIN: &str = "docklet";
 
@@ -66,6 +66,7 @@ pub struct ComposePage {
     selection: SingleSelection,
     banner: Banner,
     refreshing: Rc<Cell<bool>>,
+    start_button: Button,
 }
 
 impl ComposePage {
@@ -103,8 +104,26 @@ impl ComposePage {
 
         let banner = Banner::new();
 
+        let start_button = Button::with_label("Start");
+        start_button.add_css_class("suggested-action");
+        start_button.set_sensitive(false);
+        start_button.set_tooltip_text(Some(
+            "Starts this project's existing containers. Does not create missing ones.",
+        ));
+
+        let actions = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        actions.append(&start_button);
+
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(&actions);
         root.append(&scrolled);
         root.append(&empty);
 
@@ -116,17 +135,86 @@ impl ComposePage {
             selection,
             banner,
             refreshing: Rc::new(Cell::new(false)),
+            start_button,
+        });
+
+        page.start_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.start_selected();
+                }
+            }
+        });
+        page.selection.connect_selected_item_notify({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.start_button.set_sensitive(page.selected().is_some());
+                }
+            }
         });
 
         page.refresh();
         page
     }
 
+    /// Start the selected project's existing, stopped containers.
+    fn start_selected(self: &Rc<Self>) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let name = row.name();
+        self.banner.clear();
+        self.start_button.set_sensitive(false);
+
+        let page = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let started = gio::spawn_blocking(
+                move || -> Result<ProjectActionResult, crate::docker::DockerError> {
+                    let docker = Docker::connect()?;
+                    let projects = docker.compose_projects()?;
+                    let project =
+                        projects
+                            .into_iter()
+                            .find(|p| p.name == name)
+                            .ok_or_else(|| {
+                                crate::docker::DockerError::Protocol(
+                                    "project is no longer present".to_string(),
+                                )
+                            })?;
+                    Ok(docker.compose_start(&project))
+                },
+            )
+            .await;
+
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            match started {
+                Ok(Ok(result)) if result.is_success() => page.refresh(),
+                Ok(Ok(result)) => {
+                    let details: Vec<String> = result
+                        .failed
+                        .iter()
+                        .map(|(service, error)| format!("{service}: {error}"))
+                        .collect();
+                    page.show_error(&format!(
+                        "Some services could not be started. {}",
+                        details.join("; ")
+                    ));
+                    page.refresh();
+                }
+                Ok(Err(e)) => page.show_error(&format!("Could not start the project. {e}")),
+                Err(_) => page.show_error("Could not start the project."),
+            }
+        });
+    }
+
     pub fn widget(&self) -> &Widget {
         self.root.upcast_ref()
     }
 
-    #[allow(dead_code)]
     fn selected(&self) -> Option<ComposeObject> {
         self.selection
             .selected_item()
@@ -157,6 +245,7 @@ impl ComposePage {
                     let is_empty = page.store.n_items() == 0;
                     page.empty.set_visible(is_empty);
                     page.scrolled.set_visible(!is_empty);
+                    page.start_button.set_sensitive(page.selected().is_some());
                 }
                 Ok(Err(e)) => page.show_error(&format!("Could not list Compose projects. {e}")),
                 Err(_) => page.show_error("Could not list Compose projects."),
