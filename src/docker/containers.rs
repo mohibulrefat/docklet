@@ -80,6 +80,14 @@ impl Docker {
     pub fn start_container(&self, id: &str) -> Result<(), DockerError> {
         self.post(&format!("/containers/{id}/start"))
     }
+
+    /// Stop a running container.
+    ///
+    /// Docker sends SIGTERM and waits before killing, so this can legitimately
+    /// take several seconds.
+    pub fn stop_container(&self, id: &str) -> Result<(), DockerError> {
+        self.post(&format!("/containers/{id}/stop"))
+    }
 }
 
 #[cfg(test)]

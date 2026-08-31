@@ -348,6 +348,22 @@ mod tests {
     }
 
     #[test]
+    fn stops_a_container() {
+        let server = serve(status_only("204 No Content"));
+        assert!(server.docker.stop_container("abc123").is_ok());
+        assert_eq!(
+            server.request_line(),
+            "POST /containers/abc123/stop HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn treats_already_stopped_as_success() {
+        let server = serve(status_only("304 Not Modified"));
+        assert!(server.docker.stop_container("abc123").is_ok());
+    }
+
+    #[test]
     fn extracts_the_docker_error_message() {
         let body = br#"{"message":"No such container: abc"}"#;
         assert_eq!(api_message(body), "No such container: abc");
