@@ -12,6 +12,7 @@ use gtk::{
 
 use crate::docker::Docker;
 
+const LOG_DOMAIN: &str = "docklet";
 const DEFAULT_WIDTH: i32 = 900;
 const DEFAULT_HEIGHT: i32 = 600;
 
@@ -78,11 +79,11 @@ fn check_docker(status: &Label) {
 fn docker_status() -> String {
     match connect_and_describe() {
         Ok(description) => {
-            tracing::info!("connected to {description}");
+            glib::g_info!(LOG_DOMAIN, "connected to {description}");
             description
         }
         Err(e) => {
-            tracing::warn!("docker unavailable: {e}");
+            glib::g_warning!(LOG_DOMAIN, "docker unavailable: {e}");
             e.to_string()
         }
     }
