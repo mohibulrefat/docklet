@@ -5,6 +5,7 @@
 //! bytes into typed values. Nothing in here imports GTK, which is what keeps it
 //! testable without a UI — or a daemon.
 
+mod containers;
 mod endpoint;
 mod http;
 mod transport;
@@ -13,6 +14,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
+pub use containers::Container;
 pub use endpoint::Endpoint;
 
 /// Everything that can go wrong talking to Docker.
