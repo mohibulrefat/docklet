@@ -307,8 +307,15 @@ impl ComposePage {
 
     /// Enable Start/Stop/Logs only when a project (not a service) is selected.
     fn sync_action_buttons(&self) {
-        let ready = self.selected().is_some_and(|row| row.is_project());
-        self.start_button.set_sensitive(ready);
+        let row = self.selected();
+        let ready = row.as_ref().is_some_and(|row| row.is_project());
+        // A project already uniformly running has nothing left to start —
+        // Partial (or any other state) still does.
+        let already_running = row
+            .as_ref()
+            .is_some_and(|row| row.state_kind() == "running");
+
+        self.start_button.set_sensitive(ready && !already_running);
         self.stop_button.set_sensitive(ready);
         self.logs_button.set_sensitive(ready);
     }

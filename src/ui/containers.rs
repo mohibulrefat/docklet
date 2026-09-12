@@ -59,6 +59,9 @@ pub struct ContainersPage {
     loading: Loading,
     /// The action bar; made insensitive while an action runs.
     actions: GtkBox,
+    /// Separately insensitive when the selected container is already
+    /// running, on top of whatever `actions` as a whole allows.
+    start_button: Button,
     detail: DetailView,
     banner: Banner,
     /// A persistent notice, distinct from `banner`, shown while the list is
@@ -135,6 +138,8 @@ impl ContainersPage {
         let banner = Banner::new();
         let stale = StaleBanner::new();
 
+        let start_button = Button::with_label("Start");
+
         let detail = DetailView::new();
 
         let loading = Loading::new();
@@ -159,6 +164,7 @@ impl ContainersPage {
             selection,
             loading,
             actions: actions.clone(),
+            start_button,
             detail,
             banner,
             stale,
@@ -171,7 +177,15 @@ impl ContainersPage {
             stats: RefCell::new(None),
         });
 
-        actions.append(&page.action_button("Start", Docker::start_container));
+        actions.append(&page.start_button);
+        page.start_button.connect_clicked({
+            let page = Rc::downgrade(&page);
+            move |_| {
+                if let Some(page) = page.upgrade() {
+                    page.act("Start", Docker::start_container);
+                }
+            }
+        });
         actions.append(&page.action_button("Stop", Docker::stop_container));
         actions.append(&page.action_button("Restart", Docker::restart_container));
 
@@ -474,6 +488,12 @@ impl ContainersPage {
     fn sync_actions(&self) {
         let ready = !self.busy.get() && self.selected().is_some();
         self.actions.set_sensitive(ready);
+
+        // Independent of the group above: Start makes no sense for a
+        // container that is already running, even while the rest of the
+        // bar is otherwise enabled.
+        let already_running = self.selected().is_some_and(|c| c.state() == "running");
+        self.start_button.set_sensitive(!already_running);
     }
 
     /// Show a failure to the user, and log it.
