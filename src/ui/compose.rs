@@ -76,6 +76,12 @@ pub struct ComposePage {
     /// The app-wide Docker connection indicator, shared with every page.
     connection: Rc<ConnectionStatus>,
     refreshing: Rc<Cell<bool>>,
+    /// A refresh asked for while one was already running — set when, say, a
+    /// post-Start/Stop refresh lands while an auto-refresh tick is still in
+    /// flight, so that request is not silently dropped: seeing this true
+    /// once the in-flight refresh finishes is what triggers the follow-up
+    /// that actually picks up the just-completed action's new state.
+    refresh_again: Rc<Cell<bool>>,
     start_button: Button,
     stop_button: Button,
     logs_button: Button,
@@ -174,6 +180,7 @@ impl ComposePage {
             stale,
             connection,
             refreshing: Rc::new(Cell::new(false)),
+            refresh_again: Rc::new(Cell::new(false)),
             start_button,
             stop_button,
             logs_button,
@@ -452,8 +459,16 @@ impl ComposePage {
     }
 
     /// Reload the project list from Docker.
+    ///
+    /// If a refresh is already running, this one is queued rather than
+    /// dropped: it may have been asked for by something (a Start/Stop that
+    /// just completed) which happened after whatever the in-flight refresh
+    /// read, and skipping it would leave the list showing that older state
+    /// indefinitely — not just until the next refresh, but never, if nothing
+    /// else prompts one.
     pub fn refresh(self: &Rc<Self>) {
         if self.refreshing.replace(true) {
+            self.refresh_again.set(true);
             return;
         }
 
@@ -489,6 +504,9 @@ impl ComposePage {
                 Err(_) => page.show_error("Could not list Compose projects."),
             }
             page.refreshing.set(false);
+            if page.refresh_again.replace(false) {
+                page.refresh();
+            }
         });
     }
 }
@@ -968,6 +986,96 @@ mod tests {
         assert_eq!(after.state_label(), "Exited");
         // Same GObject, not a replacement: the row kept its identity.
         assert_eq!(before, after);
+    }
+
+    /// The same regression, but with the project expanded — its row and its
+    /// services' rows are diffed together in one `list::apply` call, which
+    /// is what a real Start/Stop's follow-up refresh does whenever the user
+    /// happens to have the project open. Covers the exact "services updated
+    /// to Exited but the project stayed Running" bug report: a project row
+    /// bug that only the collapsed-only test above could not have caught if
+    /// the two row kinds interfered with each other while diffing.
+    #[test]
+    fn an_expanded_projects_row_still_updates_when_stopped() {
+        let name = "app";
+        let expanded = expanded_of(&[name]);
+        let store = store_of(&flatten(
+            &[project(
+                name,
+                vec![
+                    service("web", "a", "running"),
+                    service("db", "b", "running"),
+                ],
+            )],
+            &expanded,
+        ));
+        assert_eq!(store.n_items(), 3);
+        assert_eq!(
+            list::row_at::<ComposeRowObject>(&store, 0).state_label(),
+            "Running"
+        );
+
+        // Both services stop — exactly what `compose_stop` plus a refresh
+        // produces.
+        list::apply::<ComposeRowObject>(
+            &store,
+            &flatten(
+                &[project(
+                    name,
+                    vec![service("web", "a", "exited"), service("db", "b", "exited")],
+                )],
+                &expanded,
+            ),
+        );
+
+        assert_eq!(store.n_items(), 3);
+        let project_row = list::row_at::<ComposeRowObject>(&store, 0);
+        assert_eq!(project_row.state_kind(), "exited");
+        assert_eq!(project_row.state_label(), "Exited");
+        assert_eq!(
+            list::row_at::<ComposeRowObject>(&store, 1).state_kind(),
+            "exited"
+        );
+        assert_eq!(
+            list::row_at::<ComposeRowObject>(&store, 2).state_kind(),
+            "exited"
+        );
+    }
+
+    /// A refresh after only one of two services stops — the project must
+    /// show Partial, not stay on whatever it showed before.
+    #[test]
+    fn a_project_shows_partial_after_an_external_stop_of_one_service() {
+        let name = "app";
+        let store = store_of(&flatten(
+            &[project(
+                name,
+                vec![
+                    service("web", "a", "running"),
+                    service("db", "b", "running"),
+                ],
+            )],
+            &HashSet::new(),
+        ));
+        assert_eq!(
+            list::row_at::<ComposeRowObject>(&store, 0).state_label(),
+            "Running"
+        );
+
+        list::apply::<ComposeRowObject>(
+            &store,
+            &flatten(
+                &[project(
+                    name,
+                    vec![service("web", "a", "running"), service("db", "b", "exited")],
+                )],
+                &HashSet::new(),
+            ),
+        );
+
+        let row = list::row_at::<ComposeRowObject>(&store, 0);
+        assert_eq!(row.state_kind(), "partial");
+        assert_eq!(row.state_label(), "Partial");
     }
 
     #[test]
