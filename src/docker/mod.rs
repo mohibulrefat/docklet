@@ -21,7 +21,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-pub use compose::{ComposeProject, ProjectActionResult, ProjectState};
+pub use compose::{ComposeProject, ComposeService, ProjectActionResult, ProjectState};
 pub use containers::{short_id, Container, Inspect};
 pub use endpoint::Endpoint;
 pub use images::{human_size, now_seconds, Image, ImageInspect, PullEvent};
@@ -71,6 +71,26 @@ impl fmt::Display for DockerError {
 }
 
 impl std::error::Error for DockerError {}
+
+impl DockerError {
+    /// Whether this failure means Docker itself could not be reached, as
+    /// opposed to Docker answering the request with an error.
+    ///
+    /// The distinction matters for the UI: a 404 or a 409 means the daemon is
+    /// up and just disagreed with this one request, so on-screen data stays
+    /// current. Losing the daemon mid-session — or a scheme Docklet cannot
+    /// even dial — means nothing already loaded can be trusted as current.
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            DockerError::Unreachable(_)
+                | DockerError::PermissionDenied(_)
+                | DockerError::UnsupportedEndpoint(_)
+                | DockerError::Protocol(_)
+                | DockerError::Timeout
+        )
+    }
+}
 
 /// A handle to the Docker Engine API.
 ///
@@ -533,6 +553,26 @@ mod tests {
     fn advice_errors_display_their_message_verbatim() {
         let err = DockerError::Unreachable("Is the Docker daemon running?".to_string());
         assert_eq!(err.to_string(), "Is the Docker daemon running?");
+    }
+
+    #[test]
+    fn classifies_connection_failures() {
+        assert!(DockerError::Unreachable("x".into()).is_connection_error());
+        assert!(DockerError::PermissionDenied("x".into()).is_connection_error());
+        assert!(DockerError::UnsupportedEndpoint("x".into()).is_connection_error());
+        assert!(DockerError::Protocol("x".into()).is_connection_error());
+        assert!(DockerError::Timeout.is_connection_error());
+    }
+
+    #[test]
+    fn does_not_classify_api_answers_as_connection_failures() {
+        // Docker was reached and answered; the daemon is not the problem.
+        assert!(!DockerError::Api {
+            status: 404,
+            message: "not found".into()
+        }
+        .is_connection_error());
+        assert!(!DockerError::Decode("bad json".into()).is_connection_error());
     }
 
     #[test]

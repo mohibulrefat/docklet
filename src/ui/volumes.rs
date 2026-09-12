@@ -11,7 +11,8 @@ use gtk::{
     ScrolledWindow, Separator, SingleSelection, Widget, Window,
 };
 
-use super::banner::Banner;
+use super::banner::{Banner, StaleBanner};
+use super::connection::ConnectionStatus;
 use super::detail::field;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Loading, Row};
@@ -55,6 +56,8 @@ pub struct VolumesPage {
     selection: SingleSelection,
     loading: Loading,
     banner: Banner,
+    stale: StaleBanner,
+    connection: Rc<ConnectionStatus>,
     refreshing: Rc<Cell<bool>>,
     name_entry: Entry,
     driver_entry: Entry,
@@ -169,7 +172,7 @@ impl VolumeDetail {
 }
 
 impl VolumesPage {
-    pub fn new() -> Rc<Self> {
+    pub fn new(connection: Rc<ConnectionStatus>) -> Rc<Self> {
         let store = gio::ListStore::new::<VolumeObject>();
         let selection = SingleSelection::new(Some(store.clone()));
 
@@ -195,6 +198,7 @@ impl VolumesPage {
         empty.add_css_class("dim-label");
 
         let banner = Banner::new();
+        let stale = StaleBanner::new();
 
         let name_entry = Entry::builder()
             .placeholder_text("volume name")
@@ -233,6 +237,7 @@ impl VolumesPage {
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(stale.widget());
         root.append(&actions);
         root.append(loading.widget());
         root.append(&scrolled);
@@ -247,6 +252,8 @@ impl VolumesPage {
             selection,
             loading,
             banner,
+            stale,
+            connection,
             refreshing: Rc::new(Cell::new(false)),
             name_entry,
             driver_entry,
@@ -502,8 +509,18 @@ impl VolumesPage {
                         page.empty.set_visible(is_empty);
                         page.scrolled.set_visible(!is_empty);
                     }
+                    page.stale.clear();
+                    page.connection.report_ok();
                 }
-                Ok(Err(e)) => page.show_error(&format!("Could not list volumes. {e}")),
+                Ok(Err(e)) => {
+                    page.show_error(&format!("Could not list volumes. {e}"));
+                    if e.is_connection_error() {
+                        page.connection.report_error(&e);
+                        if page.store.n_items() > 0 {
+                            page.stale.mark();
+                        }
+                    }
+                }
                 Err(_) => page.show_error("Could not list volumes."),
             }
             page.refreshing.set(false);

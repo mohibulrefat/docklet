@@ -10,7 +10,9 @@ use gtk::glib;
 use gtk::subclass::prelude::*;
 
 use super::list::Row;
-use crate::docker::{ComposeProject, Container, Image, Network, ProjectState, Volume};
+use crate::docker::{
+    ComposeProject, ComposeService, Container, Image, Network, ProjectState, Volume,
+};
 
 mod imp {
     use super::*;
@@ -301,67 +303,212 @@ impl NetworkObject {
     }
 }
 
-mod compose_imp {
+/// One row of the flattened Compose list: a project, or one of its services
+/// shown underneath it while the project is expanded.
+///
+/// This is a presentation concept, not Docker data — `ComposeProject` and
+/// `ComposeService` (in `docker::compose`) know nothing about expansion or
+/// row flattening, only about what Compose's labels say. Building this from
+/// them is `ui::compose`'s job; it lives here because it is the `Data` type
+/// [`ComposeRowObject`] is built and diffed from, matching every other row
+/// object in this module.
+pub enum ComposeRow {
+    Project {
+        key: String,
+        project: ComposeProject,
+        expanded: bool,
+    },
+    Service {
+        key: String,
+        service: ComposeService,
+    },
+}
+
+impl ComposeRow {
+    pub fn project(project: ComposeProject, expanded: bool) -> Self {
+        ComposeRow::Project {
+            key: format!("p:{}", project.name),
+            project,
+            expanded,
+        }
+    }
+
+    pub fn service(service: ComposeService) -> Self {
+        ComposeRow::Service {
+            key: format!("s:{}", service.container_id),
+            service,
+        }
+    }
+
+    /// The identity used to match this row across refreshes.
+    pub fn key(&self) -> &str {
+        match self {
+            ComposeRow::Project { key, .. } | ComposeRow::Service { key, .. } => key,
+        }
+    }
+}
+
+/// A project's aggregate state, or a service's own state, as the sentinel
+/// `"partial"` or the raw Docker state string — the shared vocabulary
+/// `state_indicator` (see `ui::containers`) already knows how to draw.
+fn state_kind_of(project: &ComposeProject) -> String {
+    match project.state() {
+        ProjectState::Uniform(state) => state,
+        ProjectState::Partial => "partial".to_string(),
+    }
+}
+
+mod compose_row_imp {
     use super::*;
 
     #[derive(Default)]
-    pub struct ComposeObject {
+    pub struct ComposeRowObject {
+        pub key: RefCell<String>,
+        pub is_project: Cell<bool>,
         pub name: RefCell<String>,
-        pub services: Cell<usize>,
-        pub state: RefCell<String>,
+        pub detail: RefCell<String>,
+        pub state_kind: RefCell<String>,
         pub working_dir: RefCell<String>,
+        pub expanded: Cell<bool>,
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for ComposeObject {
-        const NAME: &'static str = "DockletComposeObject";
-        type Type = super::ComposeObject;
+    impl ObjectSubclass for ComposeRowObject {
+        const NAME: &'static str = "DockletComposeRowObject";
+        type Type = super::ComposeRowObject;
     }
 
-    impl ObjectImpl for ComposeObject {}
+    impl ObjectImpl for ComposeRowObject {}
 }
 
 glib::wrapper! {
-    pub struct ComposeObject(ObjectSubclass<compose_imp::ComposeObject>);
+    pub struct ComposeRowObject(ObjectSubclass<compose_row_imp::ComposeRowObject>);
 }
 
-impl ComposeObject {
-    pub fn new(project: &ComposeProject) -> Self {
+impl ComposeRowObject {
+    pub fn new(row: &ComposeRow) -> Self {
         let object: Self = glib::Object::new();
-        object.set(project);
+        object.set(row);
         object
     }
 
-    pub fn set(&self, project: &ComposeProject) {
+    /// Copy a row's fields into this object.
+    pub fn set(&self, row: &ComposeRow) {
         let imp = self.imp();
-        imp.name.replace(project.name.clone());
-        imp.services.set(project.service_count());
-        imp.state.replace(state_text(project.state()).to_string());
-        imp.working_dir.replace(project.working_dir.clone());
+        imp.key.replace(row.key().to_string());
+        match row {
+            ComposeRow::Project {
+                project, expanded, ..
+            } => {
+                imp.is_project.set(true);
+                imp.name.replace(project.name.clone());
+                imp.detail.replace(format!(
+                    "{} service{}",
+                    project.service_count(),
+                    if project.service_count() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+                imp.state_kind.replace(state_kind_of(project));
+                imp.working_dir.replace(project.working_dir.clone());
+                imp.expanded.set(*expanded);
+            }
+            ComposeRow::Service { service, .. } => {
+                imp.is_project.set(false);
+                // Indented so it visually nests under its project without a
+                // second widget/column just to draw a hierarchy.
+                imp.name.replace(format!("    {}", service.name));
+                imp.detail.replace(service.container_name.clone());
+                imp.state_kind.replace(service.state.clone());
+                imp.working_dir.replace(String::new());
+                imp.expanded.set(false);
+            }
+        }
+    }
+
+    /// Whether this row already shows exactly this data.
+    pub fn matches(&self, row: &ComposeRow) -> bool {
+        let imp = self.imp();
+        if *imp.key.borrow() != row.key() {
+            return false;
+        }
+        match row {
+            ComposeRow::Project {
+                project, expanded, ..
+            } => {
+                imp.is_project.get()
+                    && *imp.name.borrow() == project.name
+                    && *imp.detail.borrow()
+                        == format!(
+                            "{} service{}",
+                            project.service_count(),
+                            if project.service_count() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                    && *imp.state_kind.borrow() == state_kind_of(project)
+                    && *imp.working_dir.borrow() == project.working_dir
+                    && imp.expanded.get() == *expanded
+            }
+            ComposeRow::Service { service, .. } => {
+                !imp.is_project.get()
+                    && *imp.name.borrow() == format!("    {}", service.name)
+                    && *imp.detail.borrow() == service.container_name
+                    && *imp.state_kind.borrow() == service.state
+            }
+        }
+    }
+
+    pub fn key(&self) -> String {
+        self.imp().key.borrow().clone()
+    }
+
+    pub fn is_project(&self) -> bool {
+        self.imp().is_project.get()
     }
 
     pub fn name(&self) -> String {
         self.imp().name.borrow().clone()
     }
 
-    pub fn services(&self) -> String {
-        let count = self.imp().services.get();
-        format!("{count} service{}", if count == 1 { "" } else { "s" })
+    /// "N services" for a project, or the container name for a service.
+    pub fn detail(&self) -> String {
+        self.imp().detail.borrow().clone()
     }
 
-    pub fn state(&self) -> String {
-        self.imp().state.borrow().clone()
+    /// The raw Docker state, or `"partial"` for a project whose services
+    /// disagree — see [`state_kind_of`].
+    pub fn state_kind(&self) -> String {
+        self.imp().state_kind.borrow().clone()
+    }
+
+    /// A human label for `state_kind`: the exact state, title-cased, or
+    /// "Partial".
+    pub fn state_label(&self) -> String {
+        let kind = self.state_kind();
+        if kind.is_empty() {
+            return String::new();
+        }
+        if kind == "partial" {
+            return "Partial".to_string();
+        }
+        let mut chars = kind.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
     }
 
     pub fn working_dir(&self) -> String {
         self.imp().working_dir.borrow().clone()
     }
-}
 
-fn state_text(state: ProjectState) -> &'static str {
-    match state {
-        ProjectState::Running => "Running",
-        ProjectState::Partial => "Partial",
-        ProjectState::Stopped => "Stopped",
+    /// Only meaningful for a project row: whether its services are shown.
+    pub fn expanded(&self) -> bool {
+        self.imp().expanded.get()
     }
 }

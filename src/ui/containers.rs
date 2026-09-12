@@ -12,7 +12,8 @@ use gtk::{
     Window,
 };
 
-use super::banner::Banner;
+use super::banner::{Banner, StaleBanner};
+use super::connection::ConnectionStatus;
 use super::detail::DetailView;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Loading};
@@ -23,16 +24,25 @@ const LOG_DOMAIN: &str = "docklet";
 
 /// Colours for the state bullet. `alpha(currentColor, …)` follows the theme,
 /// so the stopped bullet stays legible in both light and dark.
+///
+/// Shared across pages — Compose reuses these same classes for its project
+/// and service rows, plus `state-partial` for a project whose services
+/// disagree, and the two `docklet-*-banner`/`docklet-status-error` rules back
+/// every page's error banner, stale-data notice, and the footer's Docker
+/// connection state.
 const STYLE: &str = "
 .state-running     { color: #33d17a; }
 .state-transitional{ color: #e5a50a; }
 .state-dead        { color: #e01b24; }
 .state-stopped     { color: alpha(currentColor, 0.45); }
-.docklet-banner    { background: alpha(#e01b24, 0.15); padding: 6px; }
+.state-partial     { color: #3584e4; }
+.docklet-banner       { background: alpha(#e01b24, 0.15); padding: 6px; }
+.docklet-stale-banner { background: alpha(#e5a50a, 0.18); padding: 6px; }
+.docklet-status-error { color: #e01b24; }
 ";
 
 /// Every class `state_indicator` can apply, so a recycled row can be cleared.
-const STATE_CLASSES: [&str; 4] = [
+pub(super) const STATE_CLASSES: [&str; 4] = [
     "state-running",
     "state-transitional",
     "state-dead",
@@ -51,6 +61,11 @@ pub struct ContainersPage {
     actions: GtkBox,
     detail: DetailView,
     banner: Banner,
+    /// A persistent notice, distinct from `banner`, shown while the list is
+    /// known to be stale because the last refresh could not reach Docker.
+    stale: StaleBanner,
+    /// The app-wide Docker connection indicator, shared with every page.
+    connection: Rc<ConnectionStatus>,
     /// Guards against a second refresh starting while one is in flight.
     refreshing: Rc<Cell<bool>>,
     /// A refresh asked for while one was already running.
@@ -70,7 +85,7 @@ pub struct ContainersPage {
 }
 
 impl ContainersPage {
-    pub fn new() -> Rc<Self> {
+    pub fn new(connection: Rc<ConnectionStatus>) -> Rc<Self> {
         let store = gio::ListStore::new::<ContainerObject>();
         let selection = SingleSelection::new(Some(store.clone()));
 
@@ -118,6 +133,7 @@ impl ContainersPage {
             .build();
 
         let banner = Banner::new();
+        let stale = StaleBanner::new();
 
         let detail = DetailView::new();
 
@@ -128,6 +144,7 @@ impl ContainersPage {
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(stale.widget());
         root.append(&actions);
         root.append(loading.widget());
         root.append(&scrolled);
@@ -144,6 +161,8 @@ impl ContainersPage {
             actions: actions.clone(),
             detail,
             banner,
+            stale,
+            connection,
             refreshing: Rc::new(Cell::new(false)),
             refresh_again: Rc::new(Cell::new(false)),
             busy: Rc::new(Cell::new(false)),
@@ -631,8 +650,18 @@ impl ContainersPage {
                         page.sync_list_visibility();
                     }
                     page.sync_actions();
+                    page.stale.clear();
+                    page.connection.report_ok();
                 }
-                Ok(Err(e)) => page.show_error(&format!("Could not list containers. {e}")),
+                Ok(Err(e)) => {
+                    page.show_error(&format!("Could not list containers. {e}"));
+                    if e.is_connection_error() {
+                        page.connection.report_error(&e);
+                        if page.store.n_items() > 0 {
+                            page.stale.mark();
+                        }
+                    }
+                }
                 Err(_) => page.show_error("Could not list containers."),
             }
 
@@ -656,7 +685,7 @@ async fn remove(id: &str, force: bool) -> Result<(), DockerError> {
 ///
 /// Docker reports `running`, `exited`, `created`, `paused`, `restarting` and
 /// `dead`; anything unrecognised is shown as stopped rather than hidden.
-fn state_indicator(state: &str) -> (&'static str, &'static str) {
+pub(super) fn state_indicator(state: &str) -> (&'static str, &'static str) {
     match state {
         "running" => ("\u{25cf}", "state-running"),
         "paused" | "restarting" => ("\u{25cf}", "state-transitional"),
@@ -700,7 +729,7 @@ fn state_column() -> ColumnViewColumn {
 }
 
 /// Install the state colours once, for the whole display.
-fn install_style() {
+pub(super) fn install_style() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
 

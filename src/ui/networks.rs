@@ -11,7 +11,8 @@ use gtk::{
     ScrolledWindow, Separator, SingleSelection, Widget, Window,
 };
 
-use super::banner::Banner;
+use super::banner::{Banner, StaleBanner};
+use super::connection::ConnectionStatus;
 use super::detail::field;
 use super::dialog::confirm;
 use super::list::{self, text_column, Loading, Row};
@@ -165,6 +166,8 @@ pub struct NetworksPage {
     selection: SingleSelection,
     loading: Loading,
     banner: Banner,
+    stale: StaleBanner,
+    connection: Rc<ConnectionStatus>,
     refreshing: Rc<Cell<bool>>,
     name_entry: Entry,
     driver_entry: Entry,
@@ -174,7 +177,7 @@ pub struct NetworksPage {
 }
 
 impl NetworksPage {
-    pub fn new() -> Rc<Self> {
+    pub fn new(connection: Rc<ConnectionStatus>) -> Rc<Self> {
         let store = gio::ListStore::new::<NetworkObject>();
         let selection = SingleSelection::new(Some(store.clone()));
 
@@ -200,6 +203,7 @@ impl NetworksPage {
         empty.add_css_class("dim-label");
 
         let banner = Banner::new();
+        let stale = StaleBanner::new();
 
         let name_entry = Entry::builder()
             .placeholder_text("network name")
@@ -238,6 +242,7 @@ impl NetworksPage {
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(stale.widget());
         root.append(&actions);
         root.append(loading.widget());
         root.append(&scrolled);
@@ -252,6 +257,8 @@ impl NetworksPage {
             selection,
             loading,
             banner,
+            stale,
+            connection,
             refreshing: Rc::new(Cell::new(false)),
             name_entry,
             driver_entry,
@@ -484,8 +491,18 @@ impl NetworksPage {
                         page.sync_list_visibility();
                     }
                     page.sync_remove();
+                    page.stale.clear();
+                    page.connection.report_ok();
                 }
-                Ok(Err(e)) => page.show_error(&format!("Could not list networks. {e}")),
+                Ok(Err(e)) => {
+                    page.show_error(&format!("Could not list networks. {e}"));
+                    if e.is_connection_error() {
+                        page.connection.report_error(&e);
+                        if page.store.n_items() > 0 {
+                            page.stale.mark();
+                        }
+                    }
+                }
                 Err(_) => page.show_error("Could not list networks."),
             }
             page.refreshing.set(false);

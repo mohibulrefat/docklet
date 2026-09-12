@@ -5,21 +5,20 @@
 
 use std::rc::Rc;
 
+use gtk::glib;
 use gtk::prelude::*;
-use gtk::{gio, glib};
 use gtk::{
-    Align, Application, ApplicationWindow, Button, HeaderBar, Label, Orientation, Separator, Stack,
+    Application, ApplicationWindow, Button, HeaderBar, Orientation, Separator, Stack,
     StackSwitcher, ToggleButton,
 };
 
 use super::compose::ComposePage;
-use super::containers::ContainersPage;
+use super::connection::ConnectionStatus;
+use super::containers::{self, ContainersPage};
 use super::images::ImagesPage;
 use super::networks::NetworksPage;
 use super::volumes::VolumesPage;
-use crate::docker::Docker;
 
-const LOG_DOMAIN: &str = "docklet";
 const DEFAULT_WIDTH: i32 = 900;
 const DEFAULT_HEIGHT: i32 = 600;
 /// How often auto-refresh polls, once the user turns it on. It is never
@@ -28,11 +27,18 @@ const AUTO_REFRESH_SECONDS: u32 = 5;
 
 /// Build the main window.
 pub fn build(app: &Application) -> ApplicationWindow {
-    let containers = ContainersPage::new();
-    let compose = ComposePage::new();
-    let images = ImagesPage::new();
-    let volumes = VolumesPage::new();
-    let networks = NetworksPage::new();
+    // Installed once, up front, rather than left to whichever page happens
+    // to construct first: every page's rows (and the stale/status banners)
+    // depend on these classes existing.
+    containers::install_style();
+
+    let connection = ConnectionStatus::new();
+
+    let containers = ContainersPage::new(connection.clone());
+    let compose = ComposePage::new(connection.clone());
+    let images = ImagesPage::new(connection.clone());
+    let volumes = VolumesPage::new(connection.clone());
+    let networks = NetworksPage::new(connection.clone());
 
     let stack = Stack::builder().vexpand(true).build();
     stack.add_titled(containers.widget(), Some("containers"), "Containers");
@@ -75,13 +81,10 @@ pub fn build(app: &Application) -> ApplicationWindow {
     header.pack_start(&refresh);
     header.pack_start(&auto_refresh);
 
-    let status = status_bar();
-    check_docker(&status);
-
     let content = gtk::Box::new(Orientation::Vertical, 0);
     content.append(&stack);
     content.append(&Separator::new(Orientation::Horizontal));
-    content.append(&status);
+    content.append(connection.widget());
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -177,59 +180,4 @@ fn connect_auto_refresh(toggle: &ToggleButton, window: &ApplicationWindow, refre
             }
         }
     });
-}
-
-/// Report Docker's status in the footer.
-///
-/// The check runs on a worker thread so the window opens immediately: a daemon
-/// that is down takes as long to discover as one that is up, and neither should
-/// delay the first frame.
-fn check_docker(status: &Label) {
-    status.set_text("Checking Docker…");
-
-    let status = status.clone();
-    glib::spawn_future_local(async move {
-        match gio::spawn_blocking(docker_status).await {
-            Ok(text) => status.set_text(&text),
-            // Only reachable if the worker panicked.
-            Err(_) => status.set_text("Could not check Docker."),
-        }
-    });
-}
-
-/// Ask Docker who it is. Runs on a worker thread; returns text to display.
-///
-/// The message is built here rather than in the widget code so the UI never has
-/// to interpret a `DockerError` — or know that endpoints exist.
-fn docker_status() -> String {
-    match connect_and_describe() {
-        Ok(description) => {
-            glib::g_info!(LOG_DOMAIN, "connected to {description}");
-            description
-        }
-        Err(e) => {
-            glib::g_warning!(LOG_DOMAIN, "docker unavailable: {e}");
-            e.to_string()
-        }
-    }
-}
-
-fn connect_and_describe() -> Result<String, crate::docker::DockerError> {
-    let docker = Docker::connect()?;
-    docker.ping()?;
-    Ok(docker.version()?.to_string())
-}
-
-/// The footer that reports Docker's status.
-///
-/// Created empty; `check_docker` sets the text before the window is shown.
-fn status_bar() -> Label {
-    let label = Label::new(None);
-    label.add_css_class("dim-label");
-    label.set_halign(Align::Start);
-    label.set_margin_top(4);
-    label.set_margin_bottom(4);
-    label.set_margin_start(8);
-    label.set_margin_end(8);
-    label
 }

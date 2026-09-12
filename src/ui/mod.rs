@@ -5,6 +5,7 @@
 
 mod banner;
 mod compose;
+mod connection;
 mod containers;
 mod detail;
 mod dialog;
