@@ -41,11 +41,18 @@ pub fn build(app: &Application) -> ApplicationWindow {
     let networks = NetworksPage::new(connection.clone());
 
     let stack = Stack::builder().vexpand(true).build();
+    // Compose leads the switcher and is what Docklet opens on — the daily
+    // entry point for most users of this app is "what's running," which
+    // Compose answers at a glance; the rest keep their existing order.
+    stack.add_titled(compose.widget(), Some("compose"), "Compose");
     stack.add_titled(containers.widget(), Some("containers"), "Containers");
     stack.add_titled(images.widget(), Some("images"), "Images");
     stack.add_titled(volumes.widget(), Some("volumes"), "Volumes");
     stack.add_titled(networks.widget(), Some("networks"), "Networks");
-    stack.add_titled(compose.widget(), Some("compose"), "Compose");
+    // A `Stack` defaults to whichever child was added first, which is
+    // already Compose above — set explicitly anyway so startup page and
+    // switcher selection cannot drift apart if the add order ever changes.
+    stack.set_visible_child_name("compose");
 
     // One shared path for refreshing "whichever page is currently showing" —
     // both the manual button and auto-refresh's timer call this, so there is
