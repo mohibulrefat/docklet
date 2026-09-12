@@ -41,25 +41,25 @@ pub struct ComposeProject {
     pub config_files: String,
 }
 
-/// Whether every, some, or none of a project's containers are running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A project's aggregate state, derived fresh from its services every time —
+/// never cached, so a project can never show a state its containers no
+/// longer have.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectState {
-    Running,
+    /// Every service reports the same Docker state (`running`, `exited`, …).
+    Uniform(String),
+    /// Services disagree — some running, some not, or in different states.
     Partial,
-    Stopped,
 }
 
 impl ComposeProject {
     pub fn state(&self) -> ProjectState {
-        let running = self
-            .services
-            .iter()
-            .filter(|s| s.state == "running")
-            .count();
-        match running {
-            0 => ProjectState::Stopped,
-            n if n == self.services.len() => ProjectState::Running,
-            _ => ProjectState::Partial,
+        let mut states = self.services.iter().map(|s| s.state.as_str());
+        let first = states.next().unwrap_or("");
+        if states.all(|s| s == first) {
+            ProjectState::Uniform(first.to_string())
+        } else {
+            ProjectState::Partial
         }
     }
 
@@ -255,7 +255,10 @@ mod tests {
             labeled("app", "web", "a", "running"),
             labeled("app", "db", "b", "running"),
         ]);
-        assert_eq!(projects[0].state(), ProjectState::Running);
+        assert_eq!(
+            projects[0].state(),
+            ProjectState::Uniform("running".to_string())
+        );
     }
 
     #[test]
@@ -264,7 +267,10 @@ mod tests {
             labeled("app", "web", "a", "exited"),
             labeled("app", "db", "b", "exited"),
         ]);
-        assert_eq!(projects[0].state(), ProjectState::Stopped);
+        assert_eq!(
+            projects[0].state(),
+            ProjectState::Uniform("exited".to_string())
+        );
     }
 
     #[test]
@@ -274,6 +280,28 @@ mod tests {
             labeled("app", "db", "b", "exited"),
         ]);
         assert_eq!(projects[0].state(), ProjectState::Partial);
+    }
+
+    #[test]
+    fn reports_partial_for_distinct_non_running_states_too() {
+        // "Partial" is about disagreement, not just some-vs-none running.
+        let projects = group_projects(vec![
+            labeled("app", "web", "a", "restarting"),
+            labeled("app", "db", "b", "exited"),
+        ]);
+        assert_eq!(projects[0].state(), ProjectState::Partial);
+    }
+
+    #[test]
+    fn reports_uniform_restarting() {
+        let projects = group_projects(vec![
+            labeled("app", "web", "a", "restarting"),
+            labeled("app", "db", "b", "restarting"),
+        ]);
+        assert_eq!(
+            projects[0].state(),
+            ProjectState::Uniform("restarting".to_string())
+        );
     }
 
     #[test]

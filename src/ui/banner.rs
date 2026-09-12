@@ -49,3 +49,48 @@ impl Banner {
         self.revealer.set_reveal_child(false);
     }
 }
+
+/// A persistent strip marking a page's data as stale.
+///
+/// Unlike [`Banner`], this cannot be dismissed: it reflects an ongoing
+/// condition (Docker unreachable, showing the last data loaded) rather than a
+/// one-off action failure, so it only clears once a refresh actually
+/// succeeds again.
+pub struct StaleBanner {
+    revealer: Revealer,
+    label: Label,
+}
+
+impl StaleBanner {
+    pub fn new() -> Self {
+        let label = Label::builder()
+            .halign(Align::Start)
+            .hexpand(true)
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        row.add_css_class("docklet-stale-banner");
+        row.append(&label);
+
+        let revealer = Revealer::builder().child(&row).reveal_child(false).build();
+
+        StaleBanner { revealer, label }
+    }
+
+    pub fn widget(&self) -> &Widget {
+        self.revealer.upcast_ref()
+    }
+
+    /// Mark the page's current data as out of date.
+    pub fn mark(&self) {
+        self.label
+            .set_text("Docker is unavailable. Showing the last data loaded.");
+        self.revealer.set_reveal_child(true);
+    }
+
+    pub fn clear(&self) {
+        self.revealer.set_reveal_child(false);
+    }
+}

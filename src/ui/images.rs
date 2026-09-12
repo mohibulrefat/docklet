@@ -11,7 +11,8 @@ use gtk::{
     ProgressBar, Revealer, ScrolledWindow, Separator, SingleSelection, Widget, Window,
 };
 
-use super::banner::Banner;
+use super::banner::{Banner, StaleBanner};
+use super::connection::ConnectionStatus;
 use super::detail::field;
 use super::dialog::confirm;
 use super::list::{self, mono_column, text_column, Loading, Row};
@@ -60,6 +61,8 @@ pub struct ImagesPage {
     selection: SingleSelection,
     loading: Loading,
     banner: Banner,
+    stale: StaleBanner,
+    connection: Rc<ConnectionStatus>,
     refreshing: Rc<Cell<bool>>,
     reference: Entry,
     pull_button: Button,
@@ -176,7 +179,7 @@ impl ImageDetail {
 }
 
 impl ImagesPage {
-    pub fn new() -> Rc<Self> {
+    pub fn new(connection: Rc<ConnectionStatus>) -> Rc<Self> {
         let store = gio::ListStore::new::<ImageObject>();
         let selection = SingleSelection::new(Some(store.clone()));
 
@@ -204,6 +207,7 @@ impl ImagesPage {
         empty.add_css_class("dim-label");
 
         let banner = Banner::new();
+        let stale = StaleBanner::new();
 
         let reference = Entry::builder()
             .placeholder_text("alpine:latest")
@@ -265,6 +269,7 @@ impl ImagesPage {
 
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.append(banner.widget());
+        root.append(stale.widget());
         root.append(&actions);
         root.append(&progress);
         root.append(loading.widget());
@@ -280,6 +285,8 @@ impl ImagesPage {
             selection,
             loading,
             banner,
+            stale,
+            connection,
             refreshing: Rc::new(Cell::new(false)),
             reference,
             pull_button,
@@ -585,8 +592,18 @@ impl ImagesPage {
                         page.empty.set_visible(is_empty);
                         page.scrolled.set_visible(!is_empty);
                     }
+                    page.stale.clear();
+                    page.connection.report_ok();
                 }
-                Ok(Err(e)) => page.show_error(&format!("Could not list images. {e}")),
+                Ok(Err(e)) => {
+                    page.show_error(&format!("Could not list images. {e}"));
+                    if e.is_connection_error() {
+                        page.connection.report_error(&e);
+                        if page.store.n_items() > 0 {
+                            page.stale.mark();
+                        }
+                    }
+                }
                 Err(_) => page.show_error("Could not list images."),
             }
 
